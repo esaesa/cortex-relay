@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cortex-relay"
+version = "0.1.0"
+description = "Cost-aware multi-agent orchestration and model routing for OpenAI Codex."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "CortexRelay contributors" }
+]
+keywords = ["codex", "openai", "multi-agent", "subagents", "orchestration", "model-routing"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Build Tools",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/esaesa/cortex-relay"
+Repository = "https://github.com/esaesa/cortex-relay"
+Issues = "https://github.com/esaesa/cortex-relay/issues"
+
+[project.scripts]
+cortex-relay = "cortex_relay.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
