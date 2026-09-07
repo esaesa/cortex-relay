@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortex-relay"
-version = "0.1.0"
-description = "Cost-aware multi-agent orchestration and model routing for OpenAI Codex."
+version = "0.2.0"
+description = "Cost-aware multi-agent orchestration and reasoning-budget routing for Codex and Gemini CLI."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [
   { name = "CortexRelay contributors" }
 ]
-keywords = ["codex", "openai", "multi-agent", "subagents", "orchestration", "model-routing"]
+keywords = ["codex", "gemini", "openai", "google", "multi-agent", "subagents", "orchestration", "model-routing", "reasoning-routing"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",

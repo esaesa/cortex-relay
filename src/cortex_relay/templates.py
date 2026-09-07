@@ -98,6 +98,6 @@ ORCHESTRATION_BLOCK = """## CortexRelay orchestration
 - Keep worker reports compact so the primary model consumes summaries and evidence instead of raw repository volume.
 - Use `explorer` for code-path discovery, `architect` for design decisions, `implementer` for scoped changes, `tester` for validation, and `reviewer` for independent review.
 - Resolve contradictory worker findings with targeted follow-up before final synthesis.
-- Do not override the configured worker model or reasoning effort unless the user explicitly requests it or the configured model is unavailable.
+- Do not override a configured worker model or reasoning/thinking level unless the user explicitly requests it or the configured model is unavailable.
 - The primary model owns final synthesis, conflict resolution, and communication with the user.
 """

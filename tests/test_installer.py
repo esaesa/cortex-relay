@@ -20,6 +20,7 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result = install(scope="project", project_dir=root, values=VALUES)
+            self.assertEqual(result.provider, "codex")
             self.assertTrue(result.config_path.exists())
             self.assertTrue(result.instructions_path.exists())
             self.assertEqual(len(result.agent_paths), 5)

@@ -1,3 +1,3 @@
-"""CortexRelay: cost-aware Codex subagent orchestration configuration."""
+"""CortexRelay: cost-aware multi-agent orchestration for coding agents."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
