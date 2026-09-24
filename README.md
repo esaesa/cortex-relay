@@ -4,7 +4,7 @@
 
 CortexRelay is an open-source delegation runtime and configuration toolkit. It lets a primary coding agent keep ownership of planning and final synthesis while delegating bounded work through a common task/result contract to external providers such as OpenCode, Antigravity CLI, and OpenAI Codex CLI.
 
-It supports two provider backends today:
+The configuration bootstrap supports two host backends today:
 
 | Provider | Default orchestrator | Worker strategy |
 | --- | --- | --- |
@@ -419,7 +419,8 @@ Worker reports should contain the smallest evidence needed for the primary agent
 - Current Codex compatibility hints include `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`, but runtime model IDs are passed through rather than restricted to a fixed allowlist. Model availability still depends on the installed Codex version and account.
 - Lower reasoning is appropriate for bounded/mechanical tasks, not automatically for every worker.
 - Do not grant a delegated provider broader tool access than its task requires. CortexRelay does not pass Antigravity's global auto-approval flag or Codex's dangerous sandbox/approval bypass flag.
-- Gemini project settings are ignored in untrusted workspaces; trust the workspace before expecting `.gemini/settings.json` or project remote-agent files to load.\n- The A2A server is unauthenticated in 0.6; keep it on loopback unless you explicitly accept remote network exposure.
+- Gemini project settings are ignored in untrusted workspaces; trust the workspace before expecting `.gemini/settings.json` or project remote-agent files to load.
+- The A2A server is unauthenticated in 0.6; keep it on loopback unless you explicitly accept remote network exposure.
 
 ## Official references
 
