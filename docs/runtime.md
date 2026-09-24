@@ -159,6 +159,8 @@ Profiles may be reused by any role, including `orchestrator`. Presets overlay th
 ```toml
 active_preset = "cheap"
 
+[presets.cheap]
+
 [presets.premium-review.roles]
 reviewer = "codex-luna"
 ```
@@ -184,6 +186,22 @@ cortex-relay profiles
 cortex-relay profiles --preset premium-review
 cortex-relay profiles --json
 ```
+
+### Interactive orchestrator host
+
+When an OpenCode profile is assigned to the `orchestrator` role, CortexRelay can launch it as the actual interactive host:
+
+```bash
+python -m pip install -e ".[mcp]"
+cortex-relay launch --role orchestrator
+```
+
+The launcher uses the profile's OpenCode model and reasoning variant, keeps the interactive OpenCode session user-facing, and injects a local CortexRelay MCP server into that host session. The orchestrator can then delegate bounded roles through the same profile registry.
+
+Delegated OpenCode workers are deliberately different from the host: they run as fresh `--pure` processes with the worker permission overlay, and the inherited `cortex-relay` MCP server is disabled inside those child runs to prevent recursive delegation loops.
+
+`cortex-relay launch` currently supports OpenCode host profiles. Other host agents can use CortexRelay via MCP or A2A.
+
 
 Override a single task:
 
