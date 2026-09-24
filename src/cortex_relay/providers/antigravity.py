@@ -35,6 +35,54 @@ class AntigravityAdapter(ProviderAdapter):
             reasoning_levels=("low", "medium", "high"),
         )
 
+    def discover_models(self) -> dict[str, dict[str, Any]]:
+        """Return the live model catalog exposed by `agy models`."""
+
+        capabilities = self.capabilities()
+        if not capabilities.available:
+            return {}
+
+        try:
+            result = self.runner.run(
+                [self.binary, "models"],
+                cwd=Path.cwd(),
+                timeout_seconds=30,
+            )
+        except (OSError, subprocess.TimeoutExpired, ProcessCancelledError):
+            return {}
+
+        if result.returncode != 0:
+            return {}
+        return self._parse_model_listing(result.stdout)
+
+    @staticmethod
+    def _parse_model_listing(stdout: str) -> dict[str, dict[str, Any]]:
+        models: dict[str, dict[str, Any]] = {}
+
+        for raw_line in stdout.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            # Current agy output is human-readable rather than JSON, e.g.
+            #   gemini-3.8-flash-high     Gemini 3.8 Flash (High)
+            # Be tolerant of bullets and extra spacing so minor CLI formatting
+            # changes do not break discovery.
+            line = line.lstrip("-*• ").strip()
+            if not line:
+                continue
+
+            parts = line.split(None, 1)
+            slug = parts[0].strip()
+            label = parts[1].strip() if len(parts) > 1 else slug
+
+            if not _looks_like_model_slug(slug):
+                continue
+
+            models[slug] = {"label": label}
+
+        return models
+
     def command_for(self, task: TaskSpec) -> list[str]:
         argv = [
             self.binary,
@@ -257,3 +305,11 @@ def _optional_float(value: Any) -> float | None:
 
 def _dict_or_empty(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _looks_like_model_slug(value: str) -> bool:
+    if not value or " " in value:
+        return False
+    if value.startswith(("[", "{", "#")):
+        return False
+    return any(char.isdigit() for char in value) and any(char in value for char in ("-", "_"))
