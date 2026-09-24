@@ -89,6 +89,25 @@ class FakeOpenCodeAdapter:
 
 
 class CLIRuntimeTests(unittest.TestCase):
+    def test_setup_command_dispatches_to_wizard(self):
+        output_path = __import__("pathlib").Path("/tmp/config.toml")
+        with patch("cortex_relay.wizard.run_setup", return_value=output_path) as setup:
+            code = main(["setup"])
+        self.assertEqual(code, 0)
+        setup.assert_called_once()
+        self.assertEqual(setup.call_args.kwargs["scope"], "project")
+
+    def test_config_command_dispatches_to_editor(self):
+        output_path = __import__("pathlib").Path("/tmp/config.toml")
+        with patch(
+            "cortex_relay.wizard.run_config_editor",
+            return_value=output_path,
+        ) as editor:
+            code = main(["config", "--scope", "user"])
+        self.assertEqual(code, 0)
+        editor.assert_called_once()
+        self.assertEqual(editor.call_args.kwargs["scope"], "user")
+
     def test_providers_command(self):
         registry = FakeRegistry()
         output = io.StringIO()

@@ -70,9 +70,73 @@ Verify:
 cortex-relay --version
 ```
 
+## Easy setup and daily use
+
+For most users, CortexRelay now has a three-command workflow:
+
+```bash
+cortex-relay setup
+cortex-relay config
+cortex-relay launch
+```
+
+### 1. First time: `cortex-relay setup`
+
+The setup wizard detects installed runtime providers, discovers OpenCode models and variants when available, asks which provider/model should be the orchestrator and default worker, then lets you assign profiles to each role:
+
+```text
+orchestrator
+explorer
+architect
+implementer
+tester
+reviewer
+```
+
+It writes a validated project config to:
+
+```text
+.cortex-relay/config.toml
+```
+
+Use `--scope user` for a user-wide config instead:
+
+```bash
+cortex-relay setup --scope user
+```
+
+If a config already exists, CortexRelay keeps a `config.toml.bak` backup before writing the new canonical TOML.
+
+### 2. Change who is who: `cortex-relay config`
+
+Use the interactive editor instead of hand-editing TOML:
+
+```bash
+cortex-relay config
+```
+
+The editor can reassign roles, edit a profile's provider/model/reasoning/access, add profiles, and switch the active preset. If no config exists yet, it automatically starts the setup wizard.
+
+### 3. Work normally: `cortex-relay launch`
+
+```bash
+cortex-relay launch
+```
+
+`launch` defaults to the configured `orchestrator` role. For an OpenCode orchestrator profile, CortexRelay starts the interactive OpenCode host and injects the local CortexRelay MCP connection so the orchestrator can delegate bounded roles to the configured worker profiles.
+
+The advanced commands remain available when you need explicit control:
+
+```bash
+cortex-relay profiles
+cortex-relay models --provider opencode --refresh
+cortex-relay delegate --profile <name> "task"
+cortex-relay launch --preset <name>
+```
+
 ## Runtime delegation
 
-Version 0.6 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI as provider-neutral runtime workers, exposed through direct CLI delegation, MCP, and an A2A server for remote agents such as Gemini CLI.
+Version 0.7 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI as provider-neutral runtime workers, exposed through direct CLI delegation, MCP, and an A2A server for remote agents such as Gemini CLI.
 
 ```text
 Primary coding agent
@@ -441,7 +505,7 @@ Worker reports should contain the smallest evidence needed for the primary agent
 - Lower reasoning is appropriate for bounded/mechanical tasks, not automatically for every worker.
 - Do not grant a delegated provider broader tool access than its task requires. CortexRelay does not pass Antigravity's global auto-approval flag or Codex's dangerous sandbox/approval bypass flag.
 - Gemini project settings are ignored in untrusted workspaces; trust the workspace before expecting `.gemini/settings.json` or project remote-agent files to load.
-- The A2A server is unauthenticated in 0.6; keep it on loopback unless you explicitly accept remote network exposure.
+- The A2A server is unauthenticated in 0.7; keep it on loopback unless you explicitly accept remote network exposure.
 
 ## Official references
 

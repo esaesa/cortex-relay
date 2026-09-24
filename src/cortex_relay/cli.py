@@ -72,6 +72,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("providers", help="List runtime providers and capabilities.")
 
+    setup_parser = subparsers.add_parser(
+        "setup",
+        help="Interactively configure provider/model profiles and role assignments.",
+    )
+    setup_parser.add_argument("--scope", choices=("project", "user"), default="project")
+    setup_parser.add_argument("--workspace", type=Path, default=Path.cwd())
+
+    config_parser = subparsers.add_parser(
+        "config",
+        help="Interactively edit CortexRelay profiles, roles, and presets.",
+    )
+    config_parser.add_argument("--scope", choices=("project", "user"), default="project")
+    config_parser.add_argument("--workspace", type=Path, default=Path.cwd())
+
     profiles_parser = subparsers.add_parser(
         "profiles",
         help="Show merged execution profiles, presets, and role assignments.",
@@ -224,6 +238,34 @@ def _providers() -> int:
     return 0
 
 
+def _setup_runtime(args: argparse.Namespace) -> int:
+    from .wizard import run_setup
+
+    try:
+        run_setup(
+            workspace=args.workspace,
+            scope=args.scope,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    return 0
+
+
+def _config_runtime(args: argparse.Namespace) -> int:
+    from .wizard import run_config_editor
+
+    try:
+        run_config_editor(
+            workspace=args.workspace,
+            scope=args.scope,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    return 0
+
+
 def _profiles(args: argparse.Namespace) -> int:
     registry = default_registry()
     try:
@@ -317,7 +359,7 @@ def _launch(args: argparse.Namespace) -> int:
     if profile is None:
         print(
             f"No execution profile is configured for role {args.role!r}. "
-            "Set --profile or configure the role in .cortex-relay/config.toml.",
+            "Run 'cortex-relay setup' or pass --profile.",
             file=sys.stderr,
         )
         return 2
@@ -571,6 +613,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "providers":
         return _providers()
+    if args.command == "setup":
+        return _setup_runtime(args)
+    if args.command == "config":
+        return _config_runtime(args)
     if args.command == "profiles":
         return _profiles(args)
     if args.command == "models":
