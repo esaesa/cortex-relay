@@ -1,6 +1,6 @@
 """Execution helpers used by provider adapters."""
 
-from .process import ProcessResult, ProcessRunner
+from .process import ProcessCancelledError, ProcessResult, ProcessRunner
 from .worktree import WorktreeManager
 
-__all__ = ["ProcessResult", "ProcessRunner", "WorktreeManager"]
+__all__ = ["ProcessCancelledError", "ProcessResult", "ProcessRunner", "WorktreeManager"]
