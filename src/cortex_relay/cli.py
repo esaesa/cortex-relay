@@ -524,6 +524,10 @@ def _launch(args: argparse.Namespace) -> int:
         print("Live dashboard: open another terminal and run 'cortex-relay status --watch'")
         exit_code = adapter.launch_host(host_task)
         return exit_code
+    except KeyboardInterrupt:
+        exit_code = 130
+        print("\nCortexRelay session interrupted.")
+        return exit_code
     except (RuntimeError, ValueError, OSError) as exc:
         print(str(exc), file=sys.stderr)
         return 2

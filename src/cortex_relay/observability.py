@@ -68,7 +68,10 @@ class RunStore:
         now = _utc_now()
         record.update(
             {
-                "status": "success" if exit_code == 0 else "error",
+                "status": (
+                    "success" if exit_code == 0 else
+                    "cancelled" if exit_code == 130 else "error"
+                ),
                 "updated_at": now,
                 "completed_at": now,
                 "exit_code": exit_code,
