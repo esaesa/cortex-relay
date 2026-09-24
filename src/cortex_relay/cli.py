@@ -359,7 +359,7 @@ def _launch(args: argparse.Namespace) -> int:
     if profile is None:
         print(
             f"No execution profile is configured for role {args.role!r}. "
-            "Set --profile or configure the role in .cortex-relay/config.toml.",
+            "Run 'cortex-relay setup' or pass --profile.",
             file=sys.stderr,
         )
         return 2
