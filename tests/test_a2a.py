@@ -56,6 +56,13 @@ class A2APolicyTests(unittest.TestCase):
         self.assertIs(task.metadata["_cancel_event"], cancel_event)
         self.assertNotIn("_cancel_event", task.to_dict()["metadata"])
 
+    def test_policy_carries_transport_progress_callback(self):
+        policy = A2AServerPolicy(provider="codex")
+        callback = lambda event: None
+        task = policy.task_spec_for("Review", progress_callback=callback)
+        self.assertIs(task.metadata["_external_progress"], callback)
+        self.assertNotIn("_external_progress", task.to_dict()["metadata"])
+
     def test_workspace_write_isolation_defaults_on(self):
         policy = A2AServerPolicy(access="workspace_write")
         self.assertTrue(policy.isolate_write)
