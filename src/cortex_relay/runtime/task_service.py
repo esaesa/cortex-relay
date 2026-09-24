@@ -519,10 +519,15 @@ class TaskService:
                         artifact_id=artifact["artifact_id"],
                         artifact_sha256=artifact["patch_sha256"],
                     )
-                except (OSError, ValueError):
-                    # Artifact production is required only when another task asks
-                    # to inherit this output. Preserve the successful result here.
-                    pass
+                except (OSError, ValueError) as exc:
+                    # Preserve provider success, but make artifact failures visible.
+                    # A downstream inheritance request will retry and fail explicitly
+                    # if the problem is persistent.
+                    self.store.update_task(
+                        task.workspace,
+                        task_id,
+                        artifact_error=str(exc),
+                    )
         return result
 
     def _apply_quality_gates(
