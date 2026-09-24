@@ -740,6 +740,7 @@ class RunStore:
     def gc(
         self,
         *,
+        workspace: Path | None = None,
         retention_days: int = 30,
         max_completed_tasks: int = 1000,
         max_event_log_mb: int = 10,
@@ -751,7 +752,14 @@ class RunStore:
         candidates: list[tuple[float, Path, dict[str, Any]]] = []
         active_dependencies: set[str] = set()
 
-        for task_dir in self.root.glob("*/tasks"):
+        task_dirs = (
+            [self._workspace_dir(workspace) / "tasks"]
+            if workspace is not None
+            else list(self.root.glob("*/tasks"))
+        )
+        for task_dir in task_dirs:
+            if not task_dir.exists():
+                continue
             for path in task_dir.glob("*.json"):
                 record = self._read_record(path)
                 if not record:
@@ -823,6 +831,7 @@ class RunStore:
 
         return {
             "dry_run": dry_run,
+            "workspace": str(_workspace(workspace)) if workspace is not None else None,
             "retention_days": retention_days,
             "max_completed_tasks": max_completed_tasks,
             "max_event_log_mb": max_event_log_mb,
