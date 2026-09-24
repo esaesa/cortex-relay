@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 
 from pathlib import Path
@@ -67,6 +68,102 @@ class OpenCodeAdapter(ProviderAdapter):
 
         argv.append(self._prompt(task))
         return argv
+
+    def host_command(self, task: TaskSpec) -> list[str]:
+        """Build an interactive OpenCode host command from an orchestrator profile."""
+
+        if not task.model:
+            raise ValueError("OpenCode orchestrator profile requires a model")
+
+        selector = task.model
+        if task.reasoning and task.reasoning != "default":
+            selector = f"{selector}#{task.reasoning}"
+
+        argv = [
+            self.binary,
+            str(task.workspace),
+            "--model",
+            selector,
+        ]
+        options = _profile_options(task)
+        agent = options.get("agent")
+        if isinstance(agent, str) and agent.strip():
+            argv.extend(["--agent", agent.strip()])
+
+        prompt = task.metadata.get("host_prompt")
+        if isinstance(prompt, str) and prompt.strip():
+            argv.extend(["--prompt", prompt.strip()])
+        return argv
+
+    def host_environment(self, task: TaskSpec) -> dict[str, str]:
+        """Inject CortexRelay MCP into an interactive OpenCode host session."""
+
+        env = dict(os.environ)
+        env["OPENCODE_CLIENT"] = "cortex-relay-orchestrator"
+
+        config: dict[str, Any] = {}
+        raw = os.environ.get("OPENCODE_CONFIG_CONTENT")
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    config = parsed
+            except json.JSONDecodeError:
+                pass
+
+        mcp = config.get("mcp")
+        mcp_config = dict(mcp) if isinstance(mcp, dict) else {}
+        servers = mcp_config.get("servers")
+        server_config = dict(servers) if isinstance(servers, dict) else {}
+        server_config["cortex-relay"] = {
+            "type": "local",
+            "command": [
+                sys.executable,
+                "-m",
+                "cortex_relay.cli",
+                "serve",
+                "--transport",
+                "mcp",
+            ],
+            "cwd": str(task.workspace),
+        }
+        mcp_config["servers"] = server_config
+        config["mcp"] = mcp_config
+
+        permission = config.get("permission")
+        permission_config = dict(permission) if isinstance(permission, dict) else {}
+        permission_config["task"] = "deny"
+        permission_config["external_directory"] = "deny"
+        if task.access == "read_only":
+            permission_config["edit"] = "deny"
+        config["permission"] = permission_config
+
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+            config,
+            separators=(",", ":"),
+        )
+        return env
+
+    def launch_host(self, task: TaskSpec) -> int:
+        """Launch an interactive OpenCode orchestrator with CortexRelay MCP."""
+
+        capabilities = self.capabilities()
+        if not capabilities.available:
+            raise RuntimeError(capabilities.detail)
+        if not task.workspace.exists():
+            raise RuntimeError(f"workspace does not exist: {task.workspace}")
+
+        variant_error = self._variant_error(task)
+        if variant_error:
+            raise RuntimeError(variant_error)
+
+        completed = subprocess.run(
+            self.host_command(task),
+            cwd=task.workspace,
+            env=self.host_environment(task),
+            check=False,
+        )
+        return completed.returncode
 
     def execute(self, task: TaskSpec) -> TaskResult:
         capabilities = self.capabilities()
