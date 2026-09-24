@@ -14,7 +14,7 @@ class FakeRunner:
         self.result = result
         self.calls = []
 
-    def run(self, argv, *, cwd, timeout_seconds, env=None):
+    def run(self, argv, *, cwd, timeout_seconds, env=None, cancel_event=None):
         self.calls.append((list(argv), cwd, timeout_seconds))
         return self.result
 

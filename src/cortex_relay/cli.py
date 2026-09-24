@@ -106,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     delegate_parser.add_argument("--json", action="store_true", dest="as_json")
 
     serve_parser = subparsers.add_parser("serve", help="Expose CortexRelay to another coding agent.")
-    serve_parser.add_argument("--transport", choices=("mcp",), default="mcp")
+    serve_parser.add_argument("--transport", choices=("mcp", "a2a"), default="mcp")
     serve_parser.add_argument(
         "--mcp-transport",
         choices=("stdio", "streamable-http"),
@@ -114,6 +114,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8765)
+    serve_parser.add_argument("--a2a-provider", default="auto")
+    serve_parser.add_argument("--a2a-model")
+    serve_parser.add_argument("--a2a-reasoning", default="high")
+    serve_parser.add_argument("--a2a-role", default="reviewer")
+    serve_parser.add_argument("--a2a-workspace", type=Path, default=Path.cwd())
+    serve_parser.add_argument("--a2a-access", choices=RUNTIME_ACCESS, default="read_only")
+    serve_parser.add_argument("--a2a-timeout", type=int, default=300)
+    serve_parser.add_argument(
+        "--a2a-isolate-write",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Isolate A2A workspace-write tasks in git worktrees (default: enabled).",
+    )
+    serve_parser.add_argument(
+        "--a2a-public-url",
+        help="Public HTTP(S) base URL advertised in the Agent Card.",
+    )
+    serve_parser.add_argument(
+        "--a2a-name",
+        default="cortex-relay",
+        help="A2A/Gemini remote-agent name (lowercase slug).",
+    )
+    serve_parser.add_argument(
+        "--a2a-allow-remote",
+        action="store_true",
+        help="Allow unauthenticated A2A binding on a non-loopback interface.",
+    )
 
     return parser
 
@@ -204,21 +231,68 @@ def _delegate(args: argparse.Namespace) -> int:
 
 
 def _serve(args: argparse.Namespace) -> int:
-    if args.transport != "mcp":
-        raise ValueError(f"unsupported transport: {args.transport}")
+    if args.transport == "mcp":
+        from .transports.mcp import run_mcp
 
-    from .transports.mcp import run_mcp
+        try:
+            run_mcp(
+                transport=args.mcp_transport,
+                host=args.host,
+                port=args.port,
+            )
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        return 0
 
-    try:
-        run_mcp(
-            transport=args.mcp_transport,
-            host=args.host,
-            port=args.port,
+    if args.transport == "a2a":
+        from .transports.a2a import (
+            A2AServerPolicy,
+            agent_card_url,
+            gemini_remote_agent_markdown,
+            resolve_public_url,
+            run_a2a,
         )
-    except RuntimeError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-    return 0
+
+        try:
+            policy = A2AServerPolicy(
+                provider=args.a2a_provider,
+                model=args.a2a_model,
+                reasoning=args.a2a_reasoning,
+                role=args.a2a_role,
+                workspace=args.a2a_workspace,
+                access=args.a2a_access,
+                timeout_seconds=args.a2a_timeout,
+                isolate_write=args.a2a_isolate_write,
+            )
+            public_url = resolve_public_url(
+                host=args.host,
+                port=args.port,
+                public_url=args.a2a_public_url,
+            )
+            card_url = agent_card_url(public_url)
+            print(f"CortexRelay A2A Agent Card: {card_url}")
+            print("Gemini CLI remote-agent definition:")
+            print(
+                gemini_remote_agent_markdown(
+                    name=args.a2a_name,
+                    agent_card_url=card_url,
+                )
+            )
+            run_a2a(
+                policy=policy,
+                host=args.host,
+                port=args.port,
+                public_url=public_url,
+                name=args.a2a_name,
+                allow_remote=args.a2a_allow_remote,
+            )
+        except (RuntimeError, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        return 0
+
+    raise ValueError(f"unsupported transport: {args.transport}")
 
 
 def _codex_values(args: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[str, ConfigValues]:

@@ -50,9 +50,23 @@ class TaskSpec:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["workspace"] = str(self.workspace)
-        return data
+        return {
+            "objective": self.objective,
+            "role": self.role,
+            "provider": self.provider,
+            "workspace": str(self.workspace),
+            "access": self.access,
+            "reasoning": self.reasoning,
+            "model": self.model,
+            "acceptance_criteria": list(self.acceptance_criteria),
+            "timeout_seconds": self.timeout_seconds,
+            "isolate_write": self.isolate_write,
+            "metadata": {
+                key: value
+                for key, value in self.metadata.items()
+                if not key.startswith("_")
+            },
+        }
 
 
 @dataclass(frozen=True)

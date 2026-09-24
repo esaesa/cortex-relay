@@ -43,6 +43,30 @@ class CLIRuntimeTests(unittest.TestCase):
             code = main(["delegate", "Review auth", "--provider", "codex", "--model", "gpt-6-luna", "--reasoning", "max"])
         self.assertEqual(code, 0)
 
+    @patch("cortex_relay.transports.a2a.run_a2a")
+    def test_serve_a2a_builds_server_policy(self, run_a2a):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(
+                [
+                    "serve",
+                    "--transport",
+                    "a2a",
+                    "--a2a-provider",
+                    "codex",
+                    "--a2a-model",
+                    "gpt-6-luna",
+                    "--a2a-reasoning",
+                    "max",
+                ]
+            )
+        self.assertEqual(code, 0)
+        policy = run_a2a.call_args.kwargs["policy"]
+        self.assertEqual(policy.provider, "codex")
+        self.assertEqual(policy.model, "gpt-6-luna")
+        self.assertEqual(policy.reasoning, "max")
+        self.assertIn("/.well-known/agent-card.json", output.getvalue())
+
     @patch("cortex_relay.cli.default_registry", return_value=FakeRegistry())
     def test_delegate_json(self, _registry):
         output = io.StringIO()

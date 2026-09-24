@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from cortex_relay.core.models import Evidence, TaskResult, TaskSpec
-from cortex_relay.runtime.process import ProcessRunner
+from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner
 
 from .base import ProviderAdapter, ProviderCapabilities
 from .codex_models import compatibility_error, known_model_ids
@@ -125,6 +125,16 @@ class CodexAdapter(ProviderAdapter):
                     ),
                     cwd=task.workspace,
                     timeout_seconds=task.timeout_seconds + 15,
+                    cancel_event=task.metadata.get("_cancel_event"),
+                )
+            except ProcessCancelledError:
+                return TaskResult(
+                    status="cancelled",
+                    provider=self.name,
+                    model=task.model,
+                    summary="Codex task was cancelled.",
+                    error="provider process cancelled",
+                    duration_seconds=time.monotonic() - started,
                 )
             except subprocess.TimeoutExpired:
                 return TaskResult(
