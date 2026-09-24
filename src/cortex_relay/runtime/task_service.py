@@ -532,12 +532,27 @@ class TaskService:
             return result
         gates = task.quality_gates
         failures: list[str] = []
-        if gates.require_changed_files and not result.changed_files:
-            failures.append("no changed files were reported")
+        record = self.store.get_task(
+            task.workspace, str(task.metadata["_task_id"])
+        ) or {}
+        observed_files = tuple(
+            dict.fromkeys(
+                [
+                    *result.changed_files,
+                    *tuple(
+                        str(item)
+                        for item in (record.get("progress_files") or [])
+                        if isinstance(item, str)
+                    ),
+                ]
+            )
+        )
+        if gates.require_changed_files and not observed_files:
+            failures.append("no changed files were observed")
         if gates.require_tests and not result.tests:
             failures.append("no test evidence was reported")
         if gates.allowed_paths:
-            for changed in result.changed_files:
+            for changed in observed_files:
                 normalized = changed.replace("\\", "/")
                 if not any(
                     fnmatch.fnmatch(normalized, pattern)
@@ -559,7 +574,6 @@ class TaskService:
                     f"failed tests {failed} exceed gate {gates.max_failed_tests}"
                 )
         if gates.require_review and task.role != "reviewer":
-            record = self.store.get_task(task.workspace, str(task.metadata["_task_id"])) or {}
             reviewed = False
             for dependency in record.get("depends_on") or []:
                 try:
