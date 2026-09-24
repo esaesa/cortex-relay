@@ -680,6 +680,7 @@ class RunStore:
                         path.unlink()
                         self._events_path(workspace, task_id).unlink(missing_ok=True)
                         self._result_path(workspace, task_id).unlink(missing_ok=True)
+                        self._remove_artifact_files(current)
                         if _TASK_ID.fullmatch(task_id):
                             index_path = self._index_path(task_id)
                             index = self._read_record(index_path)
@@ -822,6 +823,7 @@ class RunStore:
                     self._task_path(workspace, task_id).unlink(missing_ok=True)
                     self._events_path(workspace, task_id).unlink(missing_ok=True)
                     self._result_path(workspace, task_id).unlink(missing_ok=True)
+                    self._remove_artifact_files(current)
                     index = self._index_path(task_id)
                     indexed = self._read_record(index)
                     if indexed and indexed.get("workspace") == str(workspace):
@@ -838,6 +840,19 @@ class RunStore:
             "count": len(planned),
             "tasks": planned,
         }
+
+    def _remove_artifact_files(self, record: dict[str, Any]) -> None:
+        artifact_id = record.get("artifact_id")
+        if not isinstance(artifact_id, str):
+            return
+        if not re.fullmatch(r"artifact-[0-9a-f]{32}", artifact_id):
+            return
+        artifact_root = self.root / "artifacts"
+        for suffix in (".json", ".patch", ".lock"):
+            try:
+                (artifact_root / f"{artifact_id}{suffix}").unlink(missing_ok=True)
+            except OSError:
+                continue
 
     def _workspace_dir(self, workspace: Path) -> Path:
         resolved = str(_workspace(workspace))
