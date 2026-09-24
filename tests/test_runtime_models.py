@@ -22,6 +22,10 @@ class RuntimeModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             TaskSpec(objective="x", timeout_seconds=0)
 
+    def test_future_reasoning_name_is_accepted(self):
+        task = TaskSpec(objective="Review", reasoning="Future-Effort")
+        self.assertEqual(task.reasoning, "future-effort")
+
     def test_result_serialization(self):
         result = TaskResult(
             status="success",
