@@ -164,7 +164,10 @@ class WorkflowControlTests(unittest.TestCase):
                 implementer_result = _wait(service, implementer["task_id"])
                 self.assertEqual(implementer_result["status"], "success")
                 impl_status = service.status(implementer["task_id"])
-                self.assertIsNotNone(impl_status.get("artifact_id"))
+                self.assertIsNotNone(
+                    impl_status.get("artifact_id"),
+                    impl_status.get("artifact_error"),
+                )
 
                 tester = service.submit(
                     TaskSpec(
