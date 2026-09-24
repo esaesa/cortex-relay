@@ -38,3 +38,24 @@ jobs:
 
       - name: Smoke-test CLI
         run: cortex-relay --help
+
+  a2a-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install A2A runtime
+        run: python -m pip install -e ".[a2a]"
+
+      - name: Run A2A tests
+        run: python -m unittest tests.test_a2a tests.test_process -v
+
+      - name: Smoke-test A2A imports
+        run: python -c "from cortex_relay.transports.a2a import A2AServerPolicy, create_a2a_app; create_a2a_app(policy=A2AServerPolicy())"

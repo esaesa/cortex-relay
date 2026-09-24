@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from cortex_relay.core.models import Evidence, TaskResult, TaskSpec
-from cortex_relay.runtime.process import ProcessRunner
+from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner
 
 from .base import ProviderAdapter, ProviderCapabilities
 from .result_schema import RESULT_SCHEMA
@@ -89,6 +89,15 @@ class AntigravityAdapter(ProviderAdapter):
                 self.command_for(task),
                 cwd=task.workspace,
                 timeout_seconds=task.timeout_seconds + 15,
+                cancel_event=task.metadata.get("_cancel_event"),
+            )
+        except ProcessCancelledError:
+            return TaskResult(
+                status="cancelled",
+                provider=self.name,
+                model=task.model,
+                summary="Antigravity task was cancelled.",
+                error="provider process cancelled",
             )
         except subprocess.TimeoutExpired:
             return TaskResult(

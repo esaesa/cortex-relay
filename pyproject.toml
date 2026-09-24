@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortex-relay"
-version = "0.4.0"
+version = "0.5.0"
 description = "Provider-neutral delegation runtime and cost-aware multi-agent configuration for coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -26,6 +26,15 @@ dependencies = []
 
 [project.optional-dependencies]
 mcp = ["mcp>=2,<3"]
+a2a = [
+  "a2a-sdk[fastapi]>=1,<2",
+  "uvicorn>=0.35",
+]
+runtime = [
+  "mcp>=2,<3",
+  "a2a-sdk[fastapi]>=1,<2",
+  "uvicorn>=0.35",
+]
 
 [project.urls]
 Homepage = "https://github.com/esaesa/cortex-relay"

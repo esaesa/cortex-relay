@@ -1,6 +1,6 @@
 # Runtime delegation
 
-CortexRelay 0.4 supports Antigravity CLI and OpenAI Codex CLI through the same provider-neutral runtime beside the existing Codex and Gemini configuration writers.
+CortexRelay 0.5 supports Antigravity CLI and OpenAI Codex CLI through the same provider-neutral runtime, with direct CLI, MCP, and A2A frontends.
 
 The primary coding agent remains the orchestrator. CortexRelay does not attempt to replace its planning loop. It receives an already-bounded task, applies deterministic routing policy, executes the selected provider, and returns a compact normalized result.
 
@@ -42,10 +42,13 @@ The base package has no runtime Python dependencies:
 python -m pip install -e .
 ```
 
-MCP support is optional:
+Protocol transports are optional:
 
 ```bash
 python -m pip install -e ".[mcp]"
+python -m pip install -e ".[a2a]"
+# or both
+python -m pip install -e ".[runtime]"
 ```
 
 Antigravity CLI is discovered through the `agy` executable and Codex CLI through `codex` on `PATH`. Authenticate each CLI using its normal upstream flow before delegation.
@@ -189,11 +192,51 @@ The MCP surface is deliberately small:
 
 `delegate_parallel` is intended for independent tasks. Each task may choose `codex` or `antigravity`; write-capable tasks are isolated into separate git worktrees by default.
 
-## A2A direction
+## A2A
 
-Gemini CLI can consume remote subagents through A2A. CortexRelay currently includes a helper for rendering Gemini remote-agent configuration, but 0.3 does not claim to ship a production A2A HTTP server yet.
+Install the optional A2A runtime:
 
-The intended next step is to expose the same provider-neutral `TaskSpec -> TaskResult` runtime through A2A without adding a second planning layer.
+```bash
+python -m pip install -e ".[a2a]"
+```
+
+Start a local remote agent backed by Codex:
+
+```bash
+cortex-relay serve \
+  --transport a2a \
+  --host 127.0.0.1 \
+  --port 8765 \
+  --a2a-provider codex \
+  --a2a-model gpt-6-luna \
+  --a2a-reasoning max \
+  --a2a-role reviewer \
+  --a2a-workspace .
+```
+
+The command prints the Agent Card URL and a Gemini CLI `kind: remote` definition. The default Agent Card is:
+
+```text
+http://127.0.0.1:8765/.well-known/agent-card.json
+```
+
+The server exposes JSON-RPC at `/a2a/jsonrpc`, HTTP+JSON at `/a2a/rest`, and a health endpoint at `/healthz`.
+
+CortexRelay uses the A2A Python SDK v1 server API and enables v0.3 compatibility on the same JSON-RPC and REST endpoints. The Agent Card advertises both v1.0 and v0.3-compatible interfaces. Current Gemini CLI normalizes v1 Agent Card interface fields before creating its A2A client, so it can consume this card directly.
+
+### A2A policy boundary
+
+A2A input is intentionally text-only at the CortexRelay boundary. Provider, model, reasoning effort, role, workspace, timeout, and access mode are server-side policy configured when the server starts. An inbound remote prompt cannot switch to another directory or escalate from read-only to write access.
+
+For write-capable A2A tasks, `--a2a-isolate-write` is enabled by default and reuses CortexRelay's git-worktree isolation.
+
+### Cancellation
+
+A2A cancellation propagates through a shared cancellation event to the provider subprocess runner. Codex or Antigravity processes are terminated instead of continuing silently after the remote task is canceled.
+
+### Network safety
+
+The A2A server is unauthenticated in version 0.5. CortexRelay therefore refuses to bind A2A to a non-loopback interface unless `--a2a-allow-remote` is explicitly supplied. Keep the default loopback binding for local Gemini CLI integration.
 
 ## Provider development
 

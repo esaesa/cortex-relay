@@ -72,7 +72,7 @@ cortex-relay --version
 
 ## Runtime delegation
 
-Version 0.4 supports both Antigravity CLI and OpenAI Codex CLI as provider-neutral runtime workers beside the existing configuration writers.
+Version 0.5 supports Antigravity CLI and OpenAI Codex CLI as provider-neutral runtime workers, exposed through direct CLI delegation, MCP, and an A2A server for remote agents such as Gemini CLI.
 
 ```text
 Primary coding agent
@@ -123,7 +123,7 @@ cortex-relay delegate \\
   "Implement the bounded change"
 ```
 
-Install the optional MCP transport and expose CortexRelay to another coding agent:
+Install the optional MCP transport and expose CortexRelay to an MCP-capable coding agent:
 
 ```bash
 python -m pip install -e ".[mcp]"
@@ -132,7 +132,48 @@ cortex-relay serve --transport mcp
 
 The MCP surface is intentionally small: `providers`, `delegate`, and `delegate_parallel`. Codex and Antigravity are both available through the same tools when their CLIs are installed.
 
-See [Runtime delegation](docs/runtime.md) and [Architecture](docs/architecture.md).
+See [Runtime delegation](docs/runtime.md) and [Architecture](docs/architecture.md) for the shared MCP/A2A runtime design.
+
+## A2A: let Gemini CLI delegate through CortexRelay
+
+Install the optional A2A runtime:
+
+```bash
+python -m pip install -e ".[a2a]"
+```
+
+Start a local Codex-backed remote agent:
+
+```bash
+cortex-relay serve \
+  --transport a2a \
+  --a2a-provider codex \
+  --a2a-model gpt-6-luna \
+  --a2a-reasoning max \
+  --a2a-role reviewer \
+  --a2a-workspace .
+```
+
+CortexRelay prints the Agent Card URL and a ready-to-copy Gemini remote-agent definition. Save that definition as, for example:
+
+```text
+.gemini/agents/cortex-codex.md
+```
+
+The local server exposes:
+
+```text
+/.well-known/agent-card.json
+/a2a/jsonrpc
+/a2a/rest
+/healthz
+```
+
+The server targets A2A v1 and enables v0.3 compatibility on its JSON-RPC and REST endpoints, which matches current Gemini CLI remote-agent behavior.
+
+A2A policy is fixed when the server starts. Incoming agents send only the task text; they cannot choose another workspace, provider, model, or write permission through the prompt. Read-only is the default. Workspace-write tasks can use isolated git worktrees.
+
+For safety, CortexRelay refuses non-loopback A2A binding unless `--a2a-allow-remote` is explicitly supplied. That flag exposes an unauthenticated service, so local binding is the recommended default.
 
 ## Quick start: Codex
 
@@ -288,7 +329,7 @@ Worker reports should contain the smallest evidence needed for the primary agent
 - Current Codex compatibility hints include `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`, but runtime model IDs are passed through rather than restricted to a fixed allowlist. Model availability still depends on the installed Codex version and account.
 - Lower reasoning is appropriate for bounded/mechanical tasks, not automatically for every worker.
 - Do not grant a delegated provider broader tool access than its task requires. CortexRelay does not pass Antigravity's global auto-approval flag or Codex's dangerous sandbox/approval bypass flag.
-- Gemini project settings are ignored in untrusted workspaces; trust the workspace before expecting `.gemini/settings.json` to load.
+- Gemini project settings are ignored in untrusted workspaces; trust the workspace before expecting `.gemini/settings.json` or project remote-agent files to load.\n- The A2A server is unauthenticated in 0.5; keep it on loopback unless you explicitly accept remote network exposure.
 
 ## Official references
 

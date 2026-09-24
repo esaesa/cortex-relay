@@ -24,7 +24,7 @@ class FakeRunner:
         self.stderr = stderr
         self.calls = []
 
-    def run(self, argv, *, cwd, timeout_seconds, env=None):
+    def run(self, argv, *, cwd, timeout_seconds, env=None, cancel_event=None):
         self.calls.append((list(argv), cwd, timeout_seconds))
         output_index = list(argv).index("--output-last-message") + 1
         Path(argv[output_index]).write_text(json.dumps(self.payload), encoding="utf-8")

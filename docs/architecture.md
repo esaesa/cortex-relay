@@ -111,15 +111,15 @@ CortexRelay now has two deliberately separate layers:
 
 The primary coding agent remains responsible for decomposition, sequencing, arbitration, and final synthesis. CortexRelay does not add a second LLM planning loop.
 
-The runtime is built around a provider-neutral `TaskSpec -> TaskResult` contract. Provider-specific CLI flags, response envelopes, authentication behavior, and error translation stay inside provider adapters. The first external runtime adapter targets Antigravity CLI.
+The runtime is built around a provider-neutral `TaskSpec -> TaskResult` contract. Provider-specific CLI flags, response envelopes, authentication behavior, and error translation stay inside provider adapters. The current runtime adapters target Antigravity CLI and OpenAI Codex CLI.
 
 ### Workspace isolation
 
-Read-only tasks are instructed not to modify files, and the Antigravity adapter compares git status before and after execution. Write-capable tasks can be isolated into linked git worktrees by the provider registry, so parallel writers do not share the same checkout.
+Read-only tasks are instructed not to modify files, and both runtime adapters compare git status before and after execution. Write-capable tasks can be isolated into linked git worktrees by the provider registry, so parallel writers do not share the same checkout.
 
 ### Protocol frontends
 
-MCP is the first runtime frontend and exposes provider discovery, single delegation, and parallel delegation. Gemini CLI remote subagents use A2A; CortexRelay includes an A2A configuration helper, while a production A2A HTTP server remains a later milestone.
+MCP and A2A are peer frontends over the same runtime. MCP exposes provider discovery plus single/parallel delegation. A2A exposes a server-side fixed delegation policy through an Agent Card, JSON-RPC, and HTTP+JSON so remote agents such as Gemini CLI can send bounded text tasks without controlling local filesystem or permission policy.
 
 ## Configuration ownership
 
@@ -136,7 +136,7 @@ The configuration writers remain idempotent and back up managed files. The runti
 
 - **Provider-neutral core:** model IDs and provider-specific CLI details are data or adapters, not core architectural dependencies.
 - **Explicit roles:** workers have narrow responsibilities and sandbox modes.
-- **Least privilege:** read-only contracts are checked for workspace changes, and write-capable tasks can use isolated git worktrees.
+- **Least privilege:** read-only contracts are checked for workspace changes, write-capable tasks can use isolated git worktrees, and A2A callers cannot alter the server-fixed workspace/access policy.
 - **Preservation:** unrelated Codex configuration should survive installation.
 - **Idempotence:** repeated initialization should update the managed policy instead of duplicating it.
 - **Traceability:** generated files can be reviewed and committed like any other project configuration.
