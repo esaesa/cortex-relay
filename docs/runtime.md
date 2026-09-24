@@ -1,6 +1,6 @@
 # Runtime delegation
 
-CortexRelay 0.5 supports Antigravity CLI and OpenAI Codex CLI through the same provider-neutral runtime, with direct CLI, MCP, and A2A frontends.
+CortexRelay 0.6 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI through the same provider-neutral runtime, with direct CLI, MCP, and A2A frontends.
 
 The primary coding agent remains the orchestrator. CortexRelay does not attempt to replace its planning loop. It receives an already-bounded task, applies deterministic routing policy, executes the selected provider, and returns a compact normalized result.
 
@@ -21,18 +21,18 @@ Codex / Gemini / another coding agent
               |
         provider adapter
               |
-        +-----+-----+
-        |           |
-        v           v
- Antigravity CLI  Codex CLI
-        |           |
-        +-----+-----+
+        +--------+--------+--------+
+        |        |        |
+        v        v        v
+    OpenCode  Antigravity  Codex
+        |        |        |
+        +--------+--------+
               |
               v
        normalized TaskResult
 ```
 
-The runtime currently ships adapters for Antigravity CLI and OpenAI Codex CLI. Additional providers should implement the same `ProviderAdapter` contract rather than leaking provider-specific flags into the core.
+The runtime currently ships adapters for OpenCode, Antigravity CLI, and OpenAI Codex CLI. Additional providers should implement the same `ProviderAdapter` contract rather than leaking provider-specific flags into the core.
 
 ## Install
 
@@ -51,7 +51,7 @@ python -m pip install -e ".[a2a]"
 python -m pip install -e ".[runtime]"
 ```
 
-Antigravity CLI is discovered through the `agy` executable and Codex CLI through `codex` on `PATH`. Authenticate each CLI using its normal upstream flow before delegation.
+OpenCode is discovered through `opencode`, Antigravity through `agy`, and Codex through `codex` on `PATH`. Authenticate each CLI using its normal upstream flow before delegation.
 
 ## Inspect providers
 
@@ -126,6 +126,108 @@ Every adapter returns a `TaskResult` with the same shape:
 
 This lets the calling coding agent reason over results without learning each provider's CLI envelope.
 
+## Execution profiles and role routing
+
+Runtime profiles live in `~/.cortex-relay/config.toml` and/or a project `.cortex-relay/config.toml`. User configuration is loaded first and the nearest project configuration overrides it.
+
+A profile is an executable resource, not a semantic role:
+
+```toml
+[profiles.zen-luna]
+provider = "opencode"
+model = "opencode/gpt-6-luna"
+reasoning = "max"
+access = "workspace_write"
+billing_class = "zen-cheap"
+fallbacks = ["codex-luna"]
+
+[profiles.codex-luna]
+provider = "codex"
+model = "gpt-6-luna"
+reasoning = "max"
+access = "workspace_write"
+billing_class = "chatgpt"
+
+[roles]
+implementer = "zen-luna"
+tester = "zen-luna"
+reviewer = "zen-luna"
+```
+
+Profiles may be reused by any role, including `orchestrator`. Presets overlay the base role mapping:
+
+```toml
+active_preset = "cheap"
+
+[presets.premium-review.roles]
+reviewer = "codex-luna"
+```
+
+Task resolution order is:
+
+```text
+explicit task profile
+        ↓
+selected preset + role mapping
+        ↓
+base role mapping
+        ↓
+legacy provider routing
+```
+
+An explicit legacy `--provider` or `--model` continues to bypass role profile mapping unless `--profile` is also supplied.
+
+Inspect the effective configuration:
+
+```bash
+cortex-relay profiles
+cortex-relay profiles --preset premium-review
+cortex-relay profiles --json
+```
+
+Override a single task:
+
+```bash
+cortex-relay delegate --profile zen-luna --access workspace_write "Implement the change"
+```
+
+Profiles also define an access ceiling. A profile declared `access = "read_only"` cannot be used for a workspace-write task.
+
+### Fallbacks
+
+Profile fallbacks are named profiles:
+
+```toml
+[profiles.zen-luna]
+provider = "opencode"
+model = "opencode/gpt-6-luna"
+reasoning = "max"
+fallbacks = ["codex-luna"]
+fallback_on = ["unavailable"]
+```
+
+The safe default is to fallback only when a provider is unavailable. Users can explicitly add `timeout` or `error`. Routing attempts are preserved in `TaskResult.metadata.routing_attempts`.
+
+For write-capable tasks, each isolated attempt can produce its own worktree. Enabling fallback on errors/timeouts therefore requires inspecting the attempted worktrees rather than assuming only the final attempt changed files.
+
+## OpenCode adapter
+
+The OpenCode adapter uses non-interactive `opencode --pure run --format json` execution. It accepts provider/model IDs through `--model`, maps the profile reasoning field to OpenCode `--variant`, parses JSON events, captures the session identifier and usage metadata, and normalizes the final JSON text into `TaskResult`.
+
+Discover the model IDs exposed by the installed OpenCode/provider configuration:
+
+```bash
+cortex-relay models --provider opencode --refresh
+cortex-relay models --provider opencode --refresh --verbose
+cortex-relay models --provider opencode --refresh --json
+```
+
+OpenCode variant validation is best-effort. When verbose model metadata explicitly lists variants, CortexRelay rejects a requested variant that is absent. When metadata is unavailable or does not advertise variants, the value is passed through.
+
+CortexRelay injects a worker-only `OPENCODE_CONFIG_CONTENT` permission overlay rather than modifying the user's persistent OpenCode settings. Broad automatic approval is not enabled. Read-only workers deny edits; external directories, native task/subagent delegation, skills, and web tools are denied; shell execution defaults to approval-required with a narrow repository/test/build allowlist. `--pure` is also used to exclude external plugins from delegated worker runs.
+
+Read-only OpenCode tasks receive the same before/after git-status contract check as the other provider adapters.
+
 ## Codex adapter
 
 The Codex adapter uses non-interactive `codex exec` with:
@@ -187,10 +289,11 @@ cortex-relay serve \
 The MCP surface is deliberately small:
 
 - `providers`
+- `profiles`
 - `delegate`
 - `delegate_parallel`
 
-`delegate_parallel` is intended for independent tasks. Each task may choose `codex` or `antigravity`; write-capable tasks are isolated into separate git worktrees by default.
+`delegate_parallel` is intended for independent tasks. Each task may choose a profile or an explicit `opencode`, `codex`, or `antigravity` provider; write-capable tasks are isolated into separate git worktrees by default.
 
 ## A2A
 
@@ -207,9 +310,7 @@ cortex-relay serve \
   --transport a2a \
   --host 127.0.0.1 \
   --port 8765 \
-  --a2a-provider codex \
-  --a2a-model gpt-6-luna \
-  --a2a-reasoning max \
+  --a2a-profile zen-luna \
   --a2a-role reviewer \
   --a2a-workspace .
 ```
@@ -226,17 +327,17 @@ CortexRelay uses the A2A Python SDK v1 server API and enables v0.3 compatibility
 
 ### A2A policy boundary
 
-A2A input is intentionally text-only at the CortexRelay boundary. Provider, model, reasoning effort, role, workspace, timeout, and access mode are server-side policy configured when the server starts. An inbound remote prompt cannot switch to another directory or escalate from read-only to write access.
+A2A input is intentionally text-only at the CortexRelay boundary. Profile/preset, provider, model, reasoning effort, role, workspace, timeout, and access mode are server-side policy configured when the server starts. An inbound remote prompt cannot switch to another directory or escalate from read-only to write access.
 
 For write-capable A2A tasks, `--a2a-isolate-write` is enabled by default and reuses CortexRelay's git-worktree isolation.
 
 ### Cancellation
 
-A2A cancellation propagates through a shared cancellation event to the provider subprocess runner. Codex or Antigravity processes are terminated instead of continuing silently after the remote task is canceled.
+A2A cancellation propagates through a shared cancellation event to the provider subprocess runner. OpenCode, Codex, or Antigravity processes are terminated instead of continuing silently after the remote task is canceled.
 
 ### Network safety
 
-The A2A server is unauthenticated in version 0.5. CortexRelay therefore refuses to bind A2A to a non-loopback interface unless `--a2a-allow-remote` is explicitly supplied. Keep the default loopback binding for local Gemini CLI integration.
+The A2A server is unauthenticated in version 0.6. CortexRelay therefore refuses to bind A2A to a non-loopback interface unless `--a2a-allow-remote` is explicitly supplied. Keep the default loopback binding for local Gemini CLI integration.
 
 ## Provider development
 
