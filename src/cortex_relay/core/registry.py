@@ -108,12 +108,13 @@ class ProviderRegistry:
                 else:
                     result = self._execute_provider(task)
         except Exception as exc:
-            self.run_store.update_task(
-                source_workspace,
-                task_id,
-                status="error",
-                error=f"Unhandled CortexRelay runtime error: {exc}",
-            )
+            updates: dict[str, Any] = {
+                "error": f"Unhandled CortexRelay runtime error: {exc}",
+                "current_activity": "Runtime error; finalizing task",
+            }
+            if not task.metadata.get("_prestarted"):
+                updates["status"] = "error"
+            self.run_store.update_task(source_workspace, task_id, **updates)
             raise
 
         result_metadata = dict(result.metadata)

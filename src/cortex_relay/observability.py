@@ -221,7 +221,7 @@ class RunStore:
         path = self._result_path(workspace, task_id)
         if record.get("result_path") and record["result_path"] != str(path):
             raise ValueError(f"task result path does not match its record: {task_id}")
-        if not path.exists() and not record.get("result_path"):
+        if not path.exists() and not record.get("result_path") and not record.get("async"):
             return None
         result = self._read_record(path)
         if result is None and record.get("status") in TERMINAL_STATUSES:
