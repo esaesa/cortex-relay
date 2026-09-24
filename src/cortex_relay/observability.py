@@ -513,7 +513,10 @@ def render_dashboard(
         if status in ACTIVE_STATUSES:
             last_event = item.get("last_event_at")
             if isinstance(last_event, str):
-                lines.append(f"  Last provider event: {_elapsed({'started_at': last_event}, now)} ago")
+                sequence = int(item.get("progress_sequence") or 0)
+                lines.append(
+                    f"  Provider events: {sequence} | last {_elapsed({'started_at': last_event}, now)} ago"
+                )
             else:
                 lines.append("  Provider events: waiting")
 

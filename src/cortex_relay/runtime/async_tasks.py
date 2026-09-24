@@ -77,10 +77,15 @@ class AsyncTaskManager:
         job = self._job(task_id)
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds must be non-negative")
+        # MCP clients impose their own request deadlines. A provider timeout is
+        # never a safe duration for one task_wait tool call.
+        wait_seconds = min(timeout_seconds, 5.0)
         try:
-            result = job.future.result(timeout=timeout_seconds)
+            result = job.future.result(timeout=wait_seconds)
         except TimeoutError:
-            return self.status(task_id)
+            record = self.status(task_id)
+            record["waited_seconds"] = wait_seconds
+            return record
         except CancelledError:
             result = job.result or self._cancelled_result(job.task)
         return {"task_id": task_id, "result": result.to_dict()}

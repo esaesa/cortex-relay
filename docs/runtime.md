@@ -402,7 +402,7 @@ The MCP surface is deliberately small:
 
 `delegate_parallel` is intended for independent tasks. Each task may choose a profile or an explicit `opencode`, `codex`, or `antigravity` provider; write-capable tasks are isolated into separate git worktrees by default.
 
-`delegate_async` starts a task and immediately returns its task ID. Use `task_status` to read the latest observable tool activity, `task_wait` to retrieve the full normalized result (`timeout_seconds=0` polls), and `task_cancel` to request cancellation. `tasks` lists async jobs started by this MCP server in a workspace. Set `access=workspace_write` explicitly for implementation tasks. The synchronous `delegate` tool remains available.
+`delegate_async` starts a task and immediately returns its task ID. Use `task_status` to read the latest observable tool activity, `task_wait` to retrieve the full normalized result (`timeout_seconds=0` polls), and `task_cancel` to request cancellation. Each `task_wait` call waits at most five seconds so it stays within MCP client request deadlines, even if given a larger value. `tasks` lists async jobs started by this MCP server in a workspace. Set `access=workspace_write` explicitly for implementation tasks. The synchronous `delegate` tool remains available.
 
 Async execution is scoped to the running MCP server. Status and recent progress are persisted in the normal workspace state, but an MCP server restart does not resume a child process or restore its full in-memory result. The dashboard and MCP status expose tool activity and bounded recent events; they do not expose model reasoning. Antigravity uses its `stream-json` events, while OpenCode and Codex use their existing JSON event streams.
 
