@@ -186,6 +186,9 @@ implementer = "zen-luna"
 tester = "zen-luna"
 reviewer = "zen-luna"
 
+[presets.zen-default]
+orchestrator = "muse-orchestrator"
+
 [presets.premium-review.roles]
 reviewer = "codex-luna"
 ```
@@ -203,6 +206,24 @@ Inspect the merged routing policy:
 cortex-relay profiles
 cortex-relay profiles --preset premium-review
 ```
+
+Launch the configured OpenCode orchestrator as the interactive host:
+
+```bash
+python -m pip install -e ".[mcp]"
+cortex-relay launch --role orchestrator
+```
+
+For the example above, that starts the Muse profile as the OpenCode host, selects its configured reasoning variant, and injects a local CortexRelay MCP connection. The host can then delegate `implementer`, `tester`, `reviewer`, or other roles back through CortexRelay. OpenCode worker profiles run as fresh restricted processes, so the selected host model and worker model remain separate.
+
+Override the host topology without editing the base mapping:
+
+```bash
+cortex-relay launch --role orchestrator --preset premium-review
+cortex-relay launch --profile muse-orchestrator
+```
+
+The built-in interactive launcher currently targets OpenCode profiles. Codex, Gemini, or other host agents can continue to use CortexRelay through MCP/A2A while still benefiting from the same role/profile routing.
 
 Use the configured role mapping:
 
