@@ -49,6 +49,7 @@ class TaskService:
         self._jobs: dict[str, _Job] = {}
         self._lock = threading.Lock()
         self._closed = False
+        self._cleaned_workspaces: set[Path] = set()
         self._heartbeat_stop = threading.Event()
         self._heartbeat_thread = threading.Thread(
             target=self._heartbeat_loop,
@@ -107,7 +108,9 @@ class TaskService:
         if inherit_workspace_from is not None and inherit_workspace_from not in depends_on:
             raise ValueError("inherit_workspace_from must also appear in depends_on")
 
-        self.registry.profiles.load(task.workspace).profile_for_task(task)
+        config = self.registry.profiles.load(task.workspace)
+        config.profile_for_task(task)
+        self._maybe_gc(task.workspace, config)
         task_id = f"task-{uuid4().hex}"
         if task_id in depends_on:
             raise ValueError("a task cannot depend on itself")
@@ -176,6 +179,19 @@ class TaskService:
             "priority": priority,
             "context": context.to_dict(),
         }
+
+    def _maybe_gc(self, workspace: Path, config: Any) -> None:
+        resolved = workspace.expanduser().resolve()
+        if resolved in self._cleaned_workspaces or not config.state.cleanup_on_start:
+            return
+        self.store.gc(
+            workspace=resolved,
+            retention_days=config.state.retention_days,
+            max_completed_tasks=config.state.max_completed_tasks,
+            max_event_log_mb=config.state.max_event_log_mb,
+            dry_run=False,
+        )
+        self._cleaned_workspaces.add(resolved)
 
     def _context_for(
         self,
