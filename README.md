@@ -134,9 +134,66 @@ cortex-relay delegate --profile <name> "task"
 cortex-relay launch --preset <name>
 ```
 
+## Live delegation visibility
+
+When you launch an interactive orchestrator, CortexRelay now creates a tracked host session and prints the live dashboard command:
+
+```text
+CortexRelay session: session-...
+Live dashboard: open another terminal and run 'cortex-relay status --watch'
+```
+
+Typical two-terminal workflow:
+
+```text
+Terminal 1
+──────────
+cortex-relay launch
+
+OpenCode / Muse
+> Implement feature X
+
+
+Terminal 2
+──────────
+cortex-relay status --watch
+
+CortexRelay live status
+=======================
+Host: muse → opencode/muse/xhigh [RUNNING]
+active 1 | success 2 | failed 0 | tokens 8.4k | cost $0.0063
+
+● muse → implementer → worker → opencode/gpt-6-luna/max
+  RUNNING     18s  Implement feature X
+  worktree .../implementer-...
+```
+
+The dashboard records the routing path, role, profile, provider, model, reasoning variant, lifecycle status, elapsed time, worktree, tests, changed files, normalized token usage, provider-reported cost when available, result summary, and errors.
+
+Useful commands:
+
+```bash
+cortex-relay status
+cortex-relay status --watch
+cortex-relay status --active-only
+cortex-relay status --json
+cortex-relay history
+cortex-relay history --json
+```
+
+Completed history can be cleared without affecting active tasks:
+
+```bash
+cortex-relay history --clear
+```
+
+Runtime state is intentionally stored outside the Git checkout. On Windows the default is under `%LOCALAPPDATA%\CortexRelay\state`; on Unix-like systems CortexRelay uses `$XDG_STATE_HOME/cortex-relay` or `~/.local/state/cortex-relay`. Set `CORTEX_RELAY_STATE_DIR` to override it.
+
+State writes are best-effort only: an unavailable or unwritable observability directory never causes a delegated coding task to fail.
+
 ## Runtime delegation
 
-Version 0.7 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI as provider-neutral runtime workers, exposed through direct CLI delegation, MCP, and an A2A server for remote agents such as Gemini CLI.
+Version 0.8 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI as provider-neutral runtime workers, exposed through direct CLI delegation, MCP, and an A2A server for remote agents such as Gemini CLI.
 
 ```text
 Primary coding agent
@@ -194,7 +251,7 @@ python -m pip install -e ".[mcp]"
 cortex-relay serve --transport mcp
 ```
 
-The MCP surface is intentionally small: `providers`, `profiles`, `delegate`, and `delegate_parallel`. OpenCode, Codex, and Antigravity are available through the same tools when their CLIs are installed.
+The MCP surface includes `providers`, `profiles`, `status`, `history`, `delegate`, and `delegate_parallel`. OpenCode, Codex, and Antigravity are available through the same tools when their CLIs are installed.
 
 See [Runtime delegation](docs/runtime.md) and [Architecture](docs/architecture.md) for the shared MCP/A2A runtime design.
 
@@ -505,7 +562,7 @@ Worker reports should contain the smallest evidence needed for the primary agent
 - Lower reasoning is appropriate for bounded/mechanical tasks, not automatically for every worker.
 - Do not grant a delegated provider broader tool access than its task requires. CortexRelay does not pass Antigravity's global auto-approval flag or Codex's dangerous sandbox/approval bypass flag.
 - Gemini project settings are ignored in untrusted workspaces; trust the workspace before expecting `.gemini/settings.json` or project remote-agent files to load.
-- The A2A server is unauthenticated in 0.7; keep it on loopback unless you explicitly accept remote network exposure.
+- The A2A server is unauthenticated in 0.8; keep it on loopback unless you explicitly accept remote network exposure.
 
 ## Official references
 
