@@ -2,13 +2,13 @@
 
 **Provider-neutral coding-agent delegation plus cost-aware orchestration configuration for Codex and Gemini CLI.**
 
-CortexRelay is an open-source delegation runtime and configuration toolkit. It lets a primary coding agent keep ownership of planning and final synthesis while delegating bounded work through a common task/result contract to external providers such as Antigravity CLI.
+CortexRelay is an open-source delegation runtime and configuration toolkit. It lets a primary coding agent keep ownership of planning and final synthesis while delegating bounded work through a common task/result contract to external providers such as Antigravity CLI and OpenAI Codex CLI.
 
 It supports two provider backends today:
 
 | Provider | Default orchestrator | Worker strategy |
 | --- | --- | --- |
-| OpenAI Codex | GPT-6 Astra / low | GPT-5.6 Luna / xhigh |
+| OpenAI Codex | GPT-6 Astra / low | GPT-6 Luna / max |
 | Gemini CLI | Gemini 3.8 Flash / HIGH | Gemini 3.8 Flash with role-specific LOW/MEDIUM/HIGH thinking |
 
 > CortexRelay is an independent community project and is not affiliated with or endorsed by OpenAI or Google.
@@ -72,7 +72,7 @@ cortex-relay --version
 
 ## Runtime delegation
 
-Version 0.3 adds a provider-neutral runtime beside the existing configuration writers.
+Version 0.4 supports both Antigravity CLI and OpenAI Codex CLI as provider-neutral runtime workers beside the existing configuration writers.
 
 ```text
 Primary coding agent
@@ -86,10 +86,13 @@ Primary coding agent
         +--> provider adapter
                   |
                   v
-            Antigravity CLI
-                  |
+        +---------+---------+
+        |                   |
+  Antigravity CLI       Codex CLI
+        |                   |
+        +---------+---------+
                   v
-        normalized result
+          normalized result
 ```
 
 The calling agent remains the orchestrator. CortexRelay handles deterministic routing, execution, isolation, normalization, and protocol exposure rather than adding another planning model.
@@ -127,7 +130,7 @@ python -m pip install -e ".[mcp]"
 cortex-relay serve --transport mcp
 ```
 
-The MCP surface is intentionally small: `providers`, `delegate`, and `delegate_parallel`.
+The MCP surface is intentionally small: `providers`, `delegate`, and `delegate_parallel`. Codex and Antigravity are both available through the same tools when their CLIs are installed.
 
 See [Runtime delegation](docs/runtime.md) and [Architecture](docs/architecture.md).
 
@@ -158,7 +161,7 @@ Default routing:
 GPT-6 Astra / low
         |
         v
-GPT-5.6 Luna / xhigh workers
+GPT-6 Luna / max workers
 ```
 
 Customize it:
@@ -167,8 +170,8 @@ Customize it:
 cortex-relay init --provider codex \
   --orchestrator-model gpt-6-astra \
   --orchestrator-effort low \
-  --worker-model gpt-5.6-luna \
-  --worker-effort xhigh \
+  --worker-model gpt-6-luna \
+  --worker-effort max \
   --threads 6
 ```
 
@@ -280,11 +283,11 @@ Worker reports should contain the smallest evidence needed for the primary agent
 
 ## Safety and limitations
 
-- CortexRelay can both generate Codex/Gemini configuration and invoke registered provider CLIs for delegated tasks. It does not proxy or intercept provider API traffic.
+- CortexRelay can both generate Codex/Gemini configuration and invoke registered Codex or Antigravity provider CLIs for delegated tasks. It does not proxy or intercept provider API traffic.
 - Model availability depends on your account, workspace policy, authentication method, product surface, and rollout status.
-- Model names, pricing, thinking levels, and subagent schemas can change. Review upstream documentation before organization-wide rollout.
+- Current Codex compatibility hints include `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`, but runtime model IDs are passed through rather than restricted to a fixed allowlist. Model availability still depends on the installed Codex version and account.
 - Lower reasoning is appropriate for bounded/mechanical tasks, not automatically for every worker.
-- Do not grant a delegated provider broader tool access than its task requires. CortexRelay does not pass Antigravity's global auto-approval flag.
+- Do not grant a delegated provider broader tool access than its task requires. CortexRelay does not pass Antigravity's global auto-approval flag or Codex's dangerous sandbox/approval bypass flag.
 - Gemini project settings are ignored in untrusted workspaces; trust the workspace before expecting `.gemini/settings.json` to load.
 
 ## Official references

@@ -6,7 +6,7 @@ This guide uses the default policy:
 
 ```text
 Primary: GPT-6 Astra / low
-Workers: GPT-5.6 Luna / xhigh
+Workers: GPT-6 Luna / max
 ```
 
 ## 1. Choose project or user scope
@@ -38,8 +38,8 @@ model_reasoning_effort = "low"
 [agents]
 enabled = true
 max_concurrent_threads_per_session = 6
-default_subagent_model = "gpt-5.6-luna"
-default_subagent_reasoning_effort = "xhigh"
+default_subagent_model = "gpt-6-luna"
+default_subagent_reasoning_effort = "max"
 interrupt_message = true
 ```
 
@@ -54,8 +54,8 @@ Create `.codex/agents/` and add the following files.
 ```toml
 name = "explorer"
 description = "Map relevant files, symbols, dependencies, and execution paths before implementation."
-model = "gpt-5.6-luna"
-model_reasoning_effort = "xhigh"
+model = "gpt-6-luna"
+model_reasoning_effort = "max"
 sandbox_mode = "read-only"
 developer_instructions = """
 Locate the smallest relevant set of files and symbols. Trace the real execution path and dependencies. Prefer targeted reads over broad scans. Do not modify files. Return compact evidence to the parent agent.
@@ -67,8 +67,8 @@ Locate the smallest relevant set of files and symbols. Trace the real execution 
 ```toml
 name = "architect"
 description = "Evaluate design boundaries, abstractions, scalability, and implementation strategy."
-model = "gpt-5.6-luna"
-model_reasoning_effort = "xhigh"
+model = "gpt-6-luna"
+model_reasoning_effort = "max"
 sandbox_mode = "read-only"
 developer_instructions = """
 Define boundaries, responsibilities, interfaces, invariants, trade-offs, and migration risks. Prefer existing abstractions. Do not edit code unless explicitly asked. Return a concise recommendation.
@@ -80,8 +80,8 @@ Define boundaries, responsibilities, interfaces, invariants, trade-offs, and mig
 ```toml
 name = "implementer"
 description = "Implement a well-defined change after scope and acceptance criteria are clear."
-model = "gpt-5.6-luna"
-model_reasoning_effort = "xhigh"
+model = "gpt-6-luna"
+model_reasoning_effort = "max"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Implement only the requested scope. Follow repository conventions. Preserve compatibility unless explicitly changed. Add tests when behavior changes. Avoid unrelated refactors. Report changed files and validation.
@@ -93,8 +93,8 @@ Implement only the requested scope. Follow repository conventions. Preserve comp
 ```toml
 name = "tester"
 description = "Design and run focused validation for changed behavior and regression risks."
-model = "gpt-5.6-luna"
-model_reasoning_effort = "xhigh"
+model = "gpt-6-luna"
+model_reasoning_effort = "max"
 sandbox_mode = "workspace-write"
 developer_instructions = """
 Prove behavior rather than only covering changed lines. Reuse the existing test framework. Run focused checks first. Report commands, outcomes, failures, and remaining untested risk.
@@ -106,8 +106,8 @@ Prove behavior rather than only covering changed lines. Reuse the existing test 
 ```toml
 name = "reviewer"
 description = "Independently review correctness, security, regressions, and missing tests."
-model = "gpt-5.6-luna"
-model_reasoning_effort = "xhigh"
+model = "gpt-6-luna"
+model_reasoning_effort = "max"
 sandbox_mode = "read-only"
 developer_instructions = """
 Review independently. Prioritize correctness, authorization, data leakage, concurrency, error handling, compatibility, architecture consistency, and missing tests. For every material finding give severity, location, failure scenario, and correction. Return PASS when no material issue exists.
@@ -170,4 +170,4 @@ Then update the `model` and `model_reasoning_effort` values in each custom agent
 
 ## Reasoning effort note
 
-The current Codex config reference lists `minimal`, `low`, `medium`, `high`, and `xhigh` for `model_reasoning_effort`. The subagent documentation may also describe a Max level on surfaces/models that support it. Use the value accepted by the surface you are configuring rather than assuming UI labels and TOML values are interchangeable.
+Current GPT-6 model support is model-specific: GPT-6 Astra supports `low`, `medium`, `high`, `xhigh`, and `max`; GPT-6 Sol and GPT-6 Luna also support `none`. CortexRelay accepts newer effort names in configuration/runtime paths so newer Codex releases can add support without being blocked by a stale CortexRelay allowlist.

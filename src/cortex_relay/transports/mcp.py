@@ -127,8 +127,6 @@ def _task_from_values(
 ) -> TaskSpec:
     if access not in {"read_only", "workspace_write"}:
         raise ValueError("access must be read_only or workspace_write")
-    if reasoning not in {"low", "medium", "high"}:
-        raise ValueError("reasoning must be low, medium, or high")
     return TaskSpec(
         objective=objective,
         role=role,

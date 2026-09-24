@@ -8,6 +8,7 @@ from cortex_relay.core.models import TaskResult, TaskSpec
 from cortex_relay.core.policy import RoutingPolicy
 from cortex_relay.providers.antigravity import AntigravityAdapter
 from cortex_relay.providers.base import ProviderAdapter
+from cortex_relay.providers.codex import CodexAdapter
 from cortex_relay.runtime.worktree import WorktreeManager
 
 
@@ -90,4 +91,4 @@ class ProviderRegistry:
 
 
 def default_registry() -> ProviderRegistry:
-    return ProviderRegistry([AntigravityAdapter()])
+    return ProviderRegistry([AntigravityAdapter(), CodexAdapter()])

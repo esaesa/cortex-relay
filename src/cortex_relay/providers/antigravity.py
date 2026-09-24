@@ -10,34 +10,7 @@ from cortex_relay.core.models import Evidence, TaskResult, TaskSpec
 from cortex_relay.runtime.process import ProcessRunner
 
 from .base import ProviderAdapter, ProviderCapabilities
-
-
-RESULT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "summary": {"type": "string"},
-        "evidence": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "finding": {"type": "string"},
-                    "path": {"type": "string"},
-                    "symbol": {"type": "string"},
-                    "severity": {"type": "string"},
-                },
-                "required": ["finding"],
-                "additionalProperties": False,
-            },
-        },
-        "changed_files": {"type": "array", "items": {"type": "string"}},
-        "commands": {"type": "array", "items": {"type": "string"}},
-        "tests": {"type": "array", "items": {"type": "string"}},
-        "risks": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["summary", "evidence", "changed_files", "commands", "tests", "risks"],
-    "additionalProperties": False,
-}
+from .result_schema import RESULT_SCHEMA
 
 
 class AntigravityAdapter(ProviderAdapter):
@@ -59,6 +32,7 @@ class AntigravityAdapter(ProviderAdapter):
             read_only_policy=True,
             workspace_write=True,
             detail=path or f"{self.binary} was not found on PATH",
+            reasoning_levels=("low", "medium", "high"),
         )
 
     def command_for(self, task: TaskSpec) -> list[str]:
@@ -82,6 +56,15 @@ class AntigravityAdapter(ProviderAdapter):
 
     def execute(self, task: TaskSpec) -> TaskResult:
         capabilities = self.capabilities()
+        if task.reasoning not in capabilities.reasoning_levels:
+            supported = ", ".join(capabilities.reasoning_levels)
+            return TaskResult(
+                status="error",
+                provider=self.name,
+                model=task.model,
+                summary="Antigravity reasoning effort is unsupported.",
+                error=f"Supported Antigravity efforts: {supported}",
+            )
         if not capabilities.available:
             return TaskResult(
                 status="unavailable",

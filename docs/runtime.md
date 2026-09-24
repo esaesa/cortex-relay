@@ -1,6 +1,6 @@
 # Runtime delegation
 
-CortexRelay 0.3 adds a provider-neutral runtime beside the existing Codex and Gemini configuration writers.
+CortexRelay 0.4 supports Antigravity CLI and OpenAI Codex CLI through the same provider-neutral runtime beside the existing Codex and Gemini configuration writers.
 
 The primary coding agent remains the orchestrator. CortexRelay does not attempt to replace its planning loop. It receives an already-bounded task, applies deterministic routing policy, executes the selected provider, and returns a compact normalized result.
 
@@ -21,14 +21,18 @@ Codex / Gemini / another coding agent
               |
         provider adapter
               |
-              v
-        Antigravity CLI
+        +-----+-----+
+        |           |
+        v           v
+ Antigravity CLI  Codex CLI
+        |           |
+        +-----+-----+
               |
               v
        normalized TaskResult
 ```
 
-The first external runtime provider is Antigravity CLI. Additional providers should implement the same `ProviderAdapter` contract rather than leaking provider-specific flags into the core.
+The runtime currently ships adapters for Antigravity CLI and OpenAI Codex CLI. Additional providers should implement the same `ProviderAdapter` contract rather than leaking provider-specific flags into the core.
 
 ## Install
 
@@ -44,7 +48,7 @@ MCP support is optional:
 python -m pip install -e ".[mcp]"
 ```
 
-Antigravity CLI is discovered through the `agy` executable on `PATH`. Authenticate Antigravity separately before using headless delegation.
+Antigravity CLI is discovered through the `agy` executable and Codex CLI through `codex` on `PATH`. Authenticate each CLI using its normal upstream flow before delegation.
 
 ## Inspect providers
 
@@ -57,16 +61,19 @@ cortex-relay doctor --runtime-only
 
 ## Delegate from the CLI
 
-Read-only review:
+Read-only review with Codex:
 
 ```bash
 cortex-relay delegate \
-  --provider antigravity \
+  --provider codex \
+  --model gpt-6-sol \
   --role reviewer \
   --reasoning high \
   --workspace . \
   "Review the authentication implementation for regressions"
 ```
+
+The same task can be sent to Antigravity by changing `--provider codex` to `--provider antigravity`.
 
 Machine-readable result:
 
@@ -116,6 +123,31 @@ Every adapter returns a `TaskResult` with the same shape:
 
 This lets the calling coding agent reason over results without learning each provider's CLI envelope.
 
+## Codex adapter
+
+The Codex adapter uses non-interactive `codex exec` with:
+
+- `--json` JSONL lifecycle events;
+- `--output-schema` for the normalized result schema;
+- `--output-last-message` for reliable final structured output;
+- `--model` when the task pins a model;
+- `model_reasoning_effort` for the requested effort;
+- `--sandbox read-only` or `--sandbox workspace-write` according to the task access contract.
+
+CortexRelay does **not** pass Codex's dangerous approval/sandbox bypass option.
+
+Current compatibility hints are:
+
+| Model | Known reasoning efforts |
+| --- | --- |
+| `gpt-6-astra` | low, medium, high, xhigh, max |
+| `gpt-6-sol` | none, low, medium, high, xhigh, max |
+| `gpt-6-luna` | none, low, medium, high, xhigh, max |
+
+These are hints, not an allowlist. Unknown future model IDs and reasoning names are passed through to Codex CLI so a newer installed Codex can use them without waiting for a CortexRelay release. CortexRelay only rejects model/effort combinations it knows are incompatible.
+
+Read-only Codex tasks also compare git status before and after execution. Write-capable tasks inherit the same provider-neutral worktree isolation used by other adapters.
+
 ## Antigravity adapter
 
 The adapter uses headless `agy -p` execution with:
@@ -155,7 +187,7 @@ The MCP surface is deliberately small:
 - `delegate`
 - `delegate_parallel`
 
-`delegate_parallel` is intended for independent tasks. Write-capable tasks are isolated into separate git worktrees by default.
+`delegate_parallel` is intended for independent tasks. Each task may choose `codex` or `antigravity`; write-capable tasks are isolated into separate git worktrees by default.
 
 ## A2A direction
 

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from cortex_relay.core.models import TaskResult, TaskSpec
-from cortex_relay.core.registry import ProviderRegistry
+from cortex_relay.core.registry import ProviderRegistry, default_registry
 from cortex_relay.providers.base import ProviderAdapter, ProviderCapabilities
 
 
@@ -39,6 +39,9 @@ class RegistryTests(unittest.TestCase):
             )
         self.assertTrue(result.ok)
         self.assertEqual(result.provider, "fake")
+
+    def test_default_registry_contains_codex_and_antigravity(self):
+        self.assertEqual(set(default_registry().names()), {"antigravity", "codex"})
 
     def test_unknown_provider_returns_unavailable(self):
         registry = ProviderRegistry([FakeProvider()])
