@@ -1,3 +1,3 @@
-"""CortexRelay: cost-aware multi-agent orchestration for coding agents."""
+"""CortexRelay: provider-neutral delegation for coding agents."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
