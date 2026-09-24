@@ -8,9 +8,29 @@ from cortex_relay.cli import main
 from cortex_relay.core.models import TaskResult
 
 
+class FakeProfileResolver:
+    def load(self, _workspace):
+        from cortex_relay.core.profiles import runtime_config_from_mapping
+
+        return runtime_config_from_mapping(
+            {
+                "profiles": {
+                    "muse": {
+                        "provider": "opencode",
+                        "model": "opencode/muse",
+                        "reasoning": "xhigh",
+                        "access": "read_only",
+                    }
+                },
+                "roles": {"orchestrator": "muse"},
+            }
+        )
+
+
 class FakeRegistry:
     def __init__(self):
         self.last_task = None
+        self.profiles = FakeProfileResolver()
 
     def capabilities(self):
         return [
@@ -168,6 +188,30 @@ class CLIRuntimeTests(unittest.TestCase):
         self.assertEqual(policy.model, "gpt-6-luna")
         self.assertEqual(policy.reasoning, "max")
         self.assertIn("/.well-known/agent-card.json", output.getvalue())
+
+    def test_launch_uses_configured_opencode_orchestrator(self):
+        registry = FakeRegistry()
+
+        class FakeHostAdapter:
+            last_task = None
+
+            def launch_host(self, task):
+                self.last_task = task
+                FakeHostAdapter.last_task = task
+                return 0
+
+        with patch("cortex_relay.cli.default_registry", return_value=registry):
+            with patch("cortex_relay.cli.importlib.util.find_spec", return_value=object()):
+                with patch(
+                    "cortex_relay.providers.opencode.OpenCodeAdapter",
+                    return_value=FakeHostAdapter(),
+                ):
+                    code = main(["launch", "--role", "orchestrator"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(FakeHostAdapter.last_task.profile, "muse")
+        self.assertEqual(FakeHostAdapter.last_task.model, "opencode/muse")
+        self.assertEqual(FakeHostAdapter.last_task.reasoning, "xhigh")
 
     def test_delegate_json(self):
         registry = FakeRegistry()
