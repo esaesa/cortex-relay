@@ -30,7 +30,8 @@ def create_server(
         instructions=(
             "Delegate bounded coding-agent work to registered external providers. "
             "The calling agent remains responsible for planning and final synthesis. "
-            "Use delegate_async for longer or parallel work, then task_status, task_events, "
+            "delegate and delegate_parallel are synchronous and should be limited to short, "
+            "bounded work. Use delegate_async for longer or parallel work, then task_status, task_events, "
             "short task_wait polls, or task_cancel by task ID. Never pass a provider "
             "timeout to task_wait. Set access=workspace_write "
             "explicitly for implementation tasks. Use status/history to inspect work."
@@ -106,9 +107,13 @@ def create_server(
 
     @server.tool()
     def delegate_parallel(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Execute independent delegated tasks concurrently.
+        """Synchronously execute short, independent delegated tasks concurrently.
 
-        Write-capable tasks are isolated into git worktrees by default.
+        The MCP call waits for every task. A client-side timeout does not cancel
+        launched workers and may prevent their task results from reaching the caller.
+        For long-running or parallel workflows, use delegate_async for each task,
+        then inspect them by task ID or group ID. Write-capable tasks are isolated
+        into git worktrees by default.
         """
         specs = [_task_from_mapping(item) for item in tasks]
         if not specs:
@@ -182,7 +187,7 @@ def create_server(
     @server.tool()
     def task_diff(task_id: str, attempt: int | None = None,
                   max_bytes: int = 65536) -> dict[str, Any]:
-        """Preview committed and uncommitted worker changes with a size limit."""
+        """Preview a saved worker patch or an inspection-only legacy comparison."""
         return async_tasks.diff(task_id, attempt, max_bytes)
 
     @server.tool()

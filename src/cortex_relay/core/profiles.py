@@ -75,7 +75,10 @@ class RuntimeProfileConfig:
     def profile_for_task(self, task: TaskSpec) -> ExecutionProfile | None:
         profile_name = task.profile
         if profile_name is None and task.provider == "auto" and task.model is None:
-            profile_name = self.effective_roles(task.preset).get(task.role)
+            roles = self.effective_roles(task.preset)
+            profile_name = roles.get(task.role)
+            if profile_name is None and roles:
+                raise ValueError(f"unknown CortexRelay role: {task.role}")
         if profile_name is None:
             return None
         try:

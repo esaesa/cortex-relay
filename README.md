@@ -359,7 +359,7 @@ Or override one task without changing configuration:
 cortex-relay delegate --profile codex-luna "Review this change"
 ```
 
-Resolution is deterministic: explicit `--profile`, then the selected preset/role mapping, then the legacy provider routing behavior. Explicit `--provider` and `--model` continue to work for backward compatibility.
+Resolution is deterministic: explicit `--profile`, then the selected preset/role mapping, then legacy provider routing when no role profiles are configured. If role profiles are configured, an unknown role fails before a worker is scheduled instead of falling through to an arbitrary provider. Explicit `--provider` and `--model` continue to bypass role profile mapping for backward compatibility.
 
 Profile fallbacks default to `unavailable` only. A user may opt into fallback on `timeout` or `error`, but doing so for write-capable profiles can leave separate isolated worktrees from failed attempts that need inspection.
 

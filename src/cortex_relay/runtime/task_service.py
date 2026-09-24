@@ -83,6 +83,9 @@ class TaskService:
             raise ValueError("group_id must be a bounded alphanumeric label")
         if len(depends_on) != len(set(depends_on)):
             raise ValueError("depends_on contains duplicate task IDs")
+        # Resolve configured roles before persisting or scheduling anything. In
+        # particular, an unknown role must not silently route through "auto".
+        self.registry.profiles.load(task.workspace).profile_for_task(task)
         task_id = f"task-{uuid4().hex}"
         if task_id in depends_on:
             raise ValueError("a task cannot depend on itself")

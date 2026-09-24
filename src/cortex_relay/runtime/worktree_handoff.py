@@ -53,7 +53,9 @@ class WorktreeHandoff:
             # Older tasks can still reveal their location, but cannot be mutated.
             attempts = [{"attempt": 1, "path": record["worktree_path"],
                          "branch": record.get("worktree_branch"),
-                         "source_repository": str(workspace), "legacy": True}]
+                         "base_commit": record.get("worktree_base_commit"),
+                         "source_repository": str(workspace), "legacy": True,
+                         "handoff_status": record.get("handoff_status")}]
         if not attempts:
             raise ValueError(f"task has no isolated worktree: {task_id}")
         if attempt is None:
@@ -93,7 +95,10 @@ class WorktreeHandoff:
                 lines = entry.splitlines()
                 location = next((line[9:] for line in lines if line.startswith("worktree ")), None)
                 listed_branch = next((line[7:] for line in lines if line.startswith("branch ")), None)
-                if location and Path(location).resolve() == path and listed_branch == f"refs/heads/{branch}":
+                branch_matches = (
+                    branch is None or listed_branch == f"refs/heads/{branch}"
+                )
+                if location and Path(location).resolve() == path and branch_matches:
                     registered = True
                     break
             if managed and not registered:
@@ -149,13 +154,121 @@ class WorktreeHandoff:
         info = self._inspect(workspace, record, item)
         if not info["exists"] or not info["registered"]:
             raise ValueError("worktree is missing or unregistered")
+        if not info["base_commit"]:
+            return self._legacy_diff(info, record, max_bytes)
         snapshot = self._snapshot(info)
         patch = snapshot["patch"]
+        excluded = self._excluded_ignored_files(record, info, snapshot["files"])
+        warnings = []
+        if item.get("legacy"):
+            warnings.append(
+                "This legacy worktree is inspection-only and cannot be applied or discarded through the managed handoff."
+            )
+        if excluded:
+            warnings.append(
+                "Some provider-reported changed files are ignored by Git and are excluded from the patch."
+            )
         return {**info, "files": snapshot["files"],
                 "patch_sha256": snapshot["patch_sha256"],
                 "patch_bytes": len(patch),
                 "patch_preview": patch[:max_bytes].decode("utf-8", "replace"),
-                "truncated": len(patch) > max_bytes}
+                "truncated": len(patch) > max_bytes,
+                "inspection_only": bool(item.get("legacy")),
+                "patch_available": True,
+                "patch_complete": not excluded,
+                "excluded_ignored_files": excluded,
+                "warnings": warnings}
+
+    def _legacy_diff(
+        self, info: dict[str, Any], record: dict[str, Any], max_bytes: int
+    ) -> dict[str, Any]:
+        """Show a clearly labeled, read-only candidate diff without saved provenance."""
+        path = Path(info["path"])
+        source = Path(info["source_repository"])
+        worker_head = info["head"]
+        source_head = _text(_git(source, "rev-parse", "HEAD"))
+        warnings = [
+            "No base commit was recorded. This is an inspection-only comparison "
+            "from the current source/worktree merge base; it may not reproduce "
+            "the original task patch and cannot be applied by CortexRelay."
+        ]
+        merge_base: str | None = None
+        try:
+            merge_base = _text(_git(source, "merge-base", source_head, str(worker_head)))
+        except ValueError:
+            warnings.append("The source and worker histories have no merge base; only current worktree changes are shown.")
+
+        if merge_base:
+            patch = _git(path, "diff", "--binary", merge_base, "--")
+            names = _git(path, "diff", "--name-only", "-z", merge_base, "--")
+            tracked_files = [name.decode("utf-8", "replace") for name in names.split(b"\0") if name]
+        else:
+            patch = _git(path, "diff", "--binary", "HEAD", "--")
+            names = _git(path, "diff", "--name-only", "-z", "HEAD", "--")
+            tracked_files = [name.decode("utf-8", "replace") for name in names.split(b"\0") if name]
+        untracked_data = _git(path, "ls-files", "--others", "--exclude-standard", "-z")
+        untracked = [name.decode("utf-8", "replace") for name in untracked_data.split(b"\0") if name]
+        files = sorted(set(tracked_files).union(untracked))
+        excluded = self._excluded_ignored_files(record, info, files)
+        if untracked:
+            warnings.append(
+                "Untracked file contents are listed but are not included in the candidate diff preview."
+            )
+        if excluded:
+            warnings.append(
+                "Some provider-reported changed files are ignored by Git and are not listed in the candidate diff."
+            )
+        return {
+            **info,
+            "inspection_only": True,
+            "patch_available": False,
+            "patch_complete": False,
+            "files": files,
+            "tracked_diff_files": tracked_files,
+            "untracked_files": untracked,
+            "current_working_diff_preview": patch[:max_bytes].decode("utf-8", "replace"),
+            "current_working_diff_bytes": len(patch),
+            "current_working_diff_truncated": len(patch) > max_bytes,
+            "excluded_ignored_files": excluded,
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def _excluded_ignored_files(
+        record: dict[str, Any], info: dict[str, Any], included_files: list[str]
+    ) -> list[str]:
+        """Find provider-reported files omitted from a Git patch because they are ignored."""
+        root = Path(info["path"]).resolve()
+        included = {item.replace("\\", "/") for item in included_files}
+        reported: list[str] = []
+        for field in ("changed_files", "progress_files"):
+            paths = record.get(field)
+            if isinstance(paths, list):
+                reported.extend(item for item in paths if isinstance(item, str))
+        excluded: set[str] = set()
+        for raw in reported:
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            try:
+                candidate = Path(raw).expanduser()
+                candidate = (candidate if candidate.is_absolute() else root / candidate).resolve()
+                if candidate == root or not candidate.is_relative_to(root) or not candidate.exists():
+                    continue
+                relative = candidate.relative_to(root).as_posix()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if relative in included:
+                continue
+            checked = subprocess.run(
+                ["git", "check-ignore", "--quiet", "--", relative],
+                cwd=root, capture_output=True,
+            )
+            if checked.returncode == 0:
+                excluded.add(relative)
+            elif checked.returncode not in (1,):
+                detail = checked.stderr.decode("utf-8", "replace").strip()
+                raise ValueError(f"git check-ignore failed for {relative}: {detail}")
+        return sorted(excluded)
 
     def _handoff_lock(self, source: Path) -> FileLock:
         key = _sha(str(source).encode("utf-8"))
@@ -184,6 +297,12 @@ class WorktreeHandoff:
             target_head = _text(_git(source, "rev-parse", "HEAD"))
             snapshot = self._snapshot(info)
             patch = snapshot["patch"]
+            excluded = self._excluded_ignored_files(record, info, snapshot["files"])
+            if excluded:
+                raise ValueError(
+                    "worker handoff is incomplete because provider-reported files are ignored by Git: "
+                    + ", ".join(excluded)
+                )
             if not patch:
                 raise ValueError("worker snapshot contains no changes to apply")
             # Check the exact patch against the current target, then recheck both snapshots.
@@ -215,6 +334,7 @@ class WorktreeHandoff:
         values = {key: info.get(key) for key in
                   ("task_id", "attempt", "path", "branch", "base_commit", "head", "status_sha256")}
         values["patch_sha256"] = snapshot["patch_sha256"]
+        values["excluded_ignored_files"] = snapshot.get("excluded_ignored_files", [])
         return _sha(json.dumps(values, sort_keys=True).encode("utf-8"))
 
     def discard(self, task_id: str, attempt: int | None = None,
@@ -231,6 +351,8 @@ class WorktreeHandoff:
                 raise ValueError("applied worktree cannot be discarded through this tool")
             info = self._inspect(workspace, record, item, managed=True)
             snapshot = self._snapshot(info)
+            excluded = self._excluded_ignored_files(record, info, snapshot["files"])
+            snapshot["excluded_ignored_files"] = excluded
             digest = self._snapshot_digest(info, snapshot)
             if confirmation_token is None:
                 token = secrets.token_urlsafe(32)
@@ -245,7 +367,12 @@ class WorktreeHandoff:
                 return {"task_id": task_id, "attempt": item["attempt"],
                         "status": "confirmation_required", "confirmation_token": token,
                         "path": info["path"], "branch": info["branch"],
-                        "files": snapshot["files"], "patch_sha256": snapshot["patch_sha256"]}
+                        "files": snapshot["files"], "patch_sha256": snapshot["patch_sha256"],
+                        "excluded_ignored_files": excluded,
+                        "warning": (
+                            "Discard removes the entire worktree, including ignored files listed here."
+                            if excluded else None
+                        )}
             confirmation = item.get("discard_confirmation") or {}
             if not secrets.compare_digest(
                 _sha(confirmation_token.encode("utf-8")),
