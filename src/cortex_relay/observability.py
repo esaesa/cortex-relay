@@ -20,7 +20,10 @@ from cortex_relay.runtime.progress import ProgressEvent
 from cortex_relay.runtime.state_lock import FileLock, lock_is_held
 
 ACTIVE_STATUSES = {"routing", "preparing", "running", "fallback", "queued"}
-TERMINAL_STATUSES = {"success", "error", "timeout", "unavailable", "cancelled", "blocked", "interrupted"}
+TERMINAL_STATUSES = {
+    "success", "error", "timeout", "unavailable", "cancelled",
+    "blocked", "interrupted", "failed_gate", "budget_exceeded",
+}
 _TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
 
@@ -126,6 +129,8 @@ class RunStore:
         owner_instance_id: str | None = None,
         group_id: str | None = None,
         depends_on: tuple[str, ...] = (),
+        priority: int = 0,
+        inherit_workspace_from: str | None = None,
     ) -> str:
         task_id = _validated_task_id(task_id or f"task-{uuid4().hex}")
         path = self._task_path(task.workspace, task_id)
@@ -143,6 +148,16 @@ class RunStore:
             "group_id": group_id,
             "depends_on": list(depends_on),
             "blocked_by": [],
+            "priority": int(priority),
+            "queue_position": None,
+            "queued_reason": None,
+            "inherit_workspace_from": inherit_workspace_from,
+            "inherited_artifact_id": None,
+            "artifact_id": None,
+            "artifact_sha256": None,
+            "context": task.context.to_dict() if task.context else None,
+            "budget": task.budget.to_dict(),
+            "quality_gates": task.quality_gates.to_dict(),
             "session_id": session.get("session_id"),
             "host_profile": session.get("host_profile"),
             "host_model": session.get("host_model"),
@@ -597,7 +612,10 @@ class RunStore:
         active = sum(item.get("status") in ACTIVE_STATUSES for item in tasks)
         success = sum(item.get("status") == "success" for item in tasks)
         failed = sum(
-            item.get("status") in {"error", "timeout", "unavailable", "cancelled", "blocked", "interrupted"}
+            item.get("status") in {
+                "error", "timeout", "unavailable", "cancelled", "blocked",
+                "interrupted", "failed_gate", "budget_exceeded",
+            }
             for item in tasks
         )
         total_input = 0
@@ -671,6 +689,146 @@ class RunStore:
                 except OSError:
                     pass
         return removed
+
+    def group_tasks(self, workspace: Path, group_id: str) -> list[dict[str, Any]]:
+        records = [
+            item for item in self.list_tasks(workspace, limit=100000)
+            if item.get("group_id") == group_id
+        ]
+        records.sort(
+            key=lambda item: (
+                int(item.get("priority") or 0),
+                str(item.get("started_at", "")),
+                str(item.get("task_id", "")),
+            ),
+            reverse=True,
+        )
+        return records
+
+    def usage_totals(
+        self,
+        workspace: Path,
+        *,
+        group_id: str | None = None,
+        session_id: str | None = None,
+    ) -> dict[str, Any]:
+        directory = self._workspace_dir(workspace) / "tasks"
+        total_tokens = 0
+        total_cost = 0.0
+        cost_known = False
+        premium_tasks = 0
+        for record in self._read_many(directory, "*.json"):
+            if group_id is not None and record.get("group_id") != group_id:
+                continue
+            if session_id is not None and record.get("session_id") != session_id:
+                continue
+            usage = record.get("usage_summary")
+            if isinstance(usage, dict):
+                total_tokens += int(usage.get("total_tokens") or 0)
+                cost = usage.get("cost")
+                if isinstance(cost, (int, float)):
+                    total_cost += float(cost)
+                    cost_known = True
+            if record.get("billing_class") and "premium" in str(record.get("billing_class")).lower():
+                premium_tasks += 1
+        return {
+            "total_tokens": total_tokens,
+            "cost": total_cost if cost_known else None,
+            "premium_tasks": premium_tasks,
+        }
+
+    def gc(
+        self,
+        *,
+        retention_days: int = 30,
+        max_completed_tasks: int = 1000,
+        max_event_log_mb: int = 10,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Prune old terminal state without deleting active tasks or worktrees."""
+
+        cutoff = datetime.now(timezone.utc).timestamp() - retention_days * 86400
+        candidates: list[tuple[float, Path, dict[str, Any]]] = []
+        active_dependencies: set[str] = set()
+
+        for task_dir in self.root.glob("*/tasks"):
+            for path in task_dir.glob("*.json"):
+                record = self._read_record(path)
+                if not record:
+                    continue
+                if record.get("status") in ACTIVE_STATUSES:
+                    active_dependencies.update(
+                        item for item in (record.get("depends_on") or [])
+                        if isinstance(item, str)
+                    )
+                    continue
+                if record.get("status") not in TERMINAL_STATUSES:
+                    continue
+                completed = record.get("completed_at") or record.get("updated_at")
+                try:
+                    stamp = datetime.fromisoformat(str(completed)).timestamp()
+                except (TypeError, ValueError):
+                    stamp = path.stat().st_mtime
+                candidates.append((stamp, path, record))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        keep_ids = {
+            str(record.get("task_id"))
+            for _, _, record in candidates[:max_completed_tasks]
+            if isinstance(record.get("task_id"), str)
+        }
+
+        planned: list[dict[str, Any]] = []
+        for stamp, path, record in candidates:
+            task_id = record.get("task_id")
+            if not isinstance(task_id, str) or task_id in active_dependencies:
+                continue
+            event_path = path.parent.parent / "events" / f"{_safe_id(task_id)}.jsonl"
+            oversized = (
+                event_path.exists()
+                and event_path.stat().st_size > max_event_log_mb * 1024 * 1024
+            )
+            expired = stamp < cutoff
+            over_count = task_id not in keep_ids
+            if not (expired or over_count or oversized):
+                continue
+            entry = {
+                "task_id": task_id,
+                "workspace": record.get("workspace"),
+                "expired": expired,
+                "over_count": over_count,
+                "oversized_events": oversized,
+            }
+            planned.append(entry)
+            if dry_run:
+                continue
+            workspace_value = record.get("workspace")
+            if not isinstance(workspace_value, str):
+                continue
+            workspace = _workspace(Path(workspace_value))
+            try:
+                with self._task_lock(workspace, task_id):
+                    current = self._read_record(self._task_path(workspace, task_id))
+                    if not current or current.get("status") not in TERMINAL_STATUSES:
+                        continue
+                    self._task_path(workspace, task_id).unlink(missing_ok=True)
+                    self._events_path(workspace, task_id).unlink(missing_ok=True)
+                    self._result_path(workspace, task_id).unlink(missing_ok=True)
+                    index = self._index_path(task_id)
+                    indexed = self._read_record(index)
+                    if indexed and indexed.get("workspace") == str(workspace):
+                        index.unlink(missing_ok=True)
+            except OSError:
+                continue
+
+        return {
+            "dry_run": dry_run,
+            "retention_days": retention_days,
+            "max_completed_tasks": max_completed_tasks,
+            "max_event_log_mb": max_event_log_mb,
+            "count": len(planned),
+            "tasks": planned,
+        }
 
     def _workspace_dir(self, workspace: Path) -> Path:
         resolved = str(_workspace(workspace))
