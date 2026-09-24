@@ -18,6 +18,8 @@ class ProviderCapabilities:
     read_only_policy: bool
     workspace_write: bool
     detail: str = ""
+    known_models: tuple[str, ...] = ()
+    reasoning_levels: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

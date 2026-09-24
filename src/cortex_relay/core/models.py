@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -7,7 +8,9 @@ from typing import Any, Literal
 
 TaskAccess = Literal["read_only", "workspace_write"]
 TaskStatus = Literal["success", "error", "timeout", "unavailable"]
-ReasoningLevel = Literal["low", "medium", "high"]
+ReasoningLevel = str
+
+_REASONING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 @dataclass(frozen=True)
@@ -31,12 +34,15 @@ class TaskSpec:
             raise ValueError("objective must not be empty")
         if self.access not in {"read_only", "workspace_write"}:
             raise ValueError(f"unsupported access mode: {self.access}")
-        if self.reasoning not in {"low", "medium", "high"}:
-            raise ValueError(f"unsupported reasoning level: {self.reasoning}")
+        if not self.reasoning or not _REASONING_RE.fullmatch(self.reasoning):
+            raise ValueError(
+                "reasoning must be a non-empty token containing only letters, numbers, '.', '_' or '-'"
+            )
         if self.timeout_seconds < 1:
             raise ValueError("timeout_seconds must be at least 1")
 
         object.__setattr__(self, "workspace", Path(self.workspace).expanduser().resolve())
+        object.__setattr__(self, "reasoning", self.reasoning.lower())
         object.__setattr__(
             self,
             "acceptance_criteria",
