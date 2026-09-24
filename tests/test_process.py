@@ -38,6 +38,47 @@ class ProcessRunnerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "ok")
 
+    def test_process_stdin_is_devnull(self):
+        result = ProcessRunner().run(
+            [sys.executable, "-c", "import sys; print('eof:' + repr(sys.stdin.read()))"],
+            cwd=Path.cwd(),
+            timeout_seconds=5,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "eof:''")
+
+    def test_process_decodes_utf8_bytes_safely(self):
+        lines = []
+        result = ProcessRunner().run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write('route → Î\\n'.encode('utf-8'))",
+            ],
+            cwd=Path.cwd(),
+            timeout_seconds=5,
+            on_stdout_line=lines.append,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("→", result.stdout)
+        self.assertEqual(lines, ["route → Î"])
+
+    def test_process_does_not_hang_when_descendant_holds_pipe_open(self):
+        result = ProcessRunner().run(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess, sys; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)']); print('done', flush=True)",
+            ],
+            cwd=Path.cwd(),
+            timeout_seconds=3,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "done")
+
+
+
+
     @unittest.skipUnless(os.name == "nt", "Windows npm shim regression")
     def test_windows_cmd_shim_uses_sibling_powershell_without_shell_interpolation(self):
         with tempfile.TemporaryDirectory() as tmp:

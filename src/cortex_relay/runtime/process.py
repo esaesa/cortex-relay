@@ -112,39 +112,24 @@ class ProcessRunner:
             cwd=cwd,
             env=None if env is None else dict(env),
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         started = time.monotonic()
         self._heartbeat(on_heartbeat, process.pid, True)
-
-        if on_stdout_line is not None or on_stderr_line is not None:
-            return self._stream(
-                process, original_argv, started, timeout_seconds, cancel_event,
-                on_stdout_line, on_stderr_line, on_heartbeat,
-            )
-
-        while True:
-            if cancel_event is not None and cancel_event.is_set():
-                self._terminate(process)
-                raise ProcessCancelledError("provider process cancelled")
-
-            elapsed = time.monotonic() - started
-            remaining = timeout_seconds - elapsed
-            if remaining <= 0:
-                self._terminate(process)
-                raise subprocess.TimeoutExpired(original_argv, timeout_seconds)
-
-            try:
-                stdout, stderr = process.communicate(timeout=min(0.2, remaining))
-                return ProcessResult(
-                    argv=tuple(original_argv),
-                    returncode=process.returncode,
-                    stdout=stdout,
-                    stderr=stderr,
-                )
-            except subprocess.TimeoutExpired:
-                continue
+        return self._stream(
+            process,
+            original_argv,
+            started,
+            timeout_seconds,
+            cancel_event,
+            on_stdout_line,
+            on_stderr_line,
+            on_heartbeat,
+        )
 
     def _stream(
         self,
@@ -246,7 +231,14 @@ class ProcessRunner:
     def _terminate(process: subprocess.Popen[str], *, communicating: bool = True) -> None:
         if process.poll() is not None:
             return
-        process.terminate()
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                capture_output=True,
+                check=False,
+            )
+        else:
+            process.terminate()
         try:
             if communicating:
                 process.communicate(timeout=5)
@@ -255,6 +247,9 @@ class ProcessRunner:
         except subprocess.TimeoutExpired:
             process.kill()
             if communicating:
-                process.communicate()
+                try:
+                    process.communicate(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
             else:
                 process.wait()

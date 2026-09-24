@@ -384,22 +384,30 @@ class OpenCodeAdapter(ProviderAdapter):
 
         config = dict(existing)
 
-        # The interactive CortexRelay host injects this MCP server. A delegated
-        # OpenCode worker must not inherit it or it could recursively delegate
-        # back into CortexRelay.
+        # The interactive CortexRelay host injects this MCP server, and user
+        # opencode.json files may define external MCP servers whose schemas
+        # OpenCode eagerly injects on every step. Delegated workers forbid MCP
+        # usage, so disable all external MCP servers in the worker overlay.
         mcp = config.get("mcp")
-        if isinstance(mcp, dict):
-            mcp_config = dict(mcp)
-            servers = mcp_config.get("servers")
-            if isinstance(servers, dict) and "cortex-relay" in servers:
-                server_config = dict(servers)
-                cortex_server = server_config.get("cortex-relay")
-                if isinstance(cortex_server, dict):
-                    disabled_server = dict(cortex_server)
-                    disabled_server["disabled"] = True
-                    server_config["cortex-relay"] = disabled_server
-                    mcp_config["servers"] = server_config
-                    config["mcp"] = mcp_config
+        mcp_config = dict(mcp) if isinstance(mcp, dict) else {}
+        for server_name in _discover_configured_mcp_servers(task.workspace):
+            mcp_config[server_name] = {"enabled": False}
+
+        if isinstance(mcp_config.get("cortex-relay"), dict):
+            mcp_config["cortex-relay"] = {"enabled": False}
+
+        servers = mcp_config.get("servers")
+        if isinstance(servers, dict) and "cortex-relay" in servers:
+            server_config = dict(servers)
+            cortex_server = server_config.get("cortex-relay")
+            if isinstance(cortex_server, dict):
+                disabled_server = dict(cortex_server)
+                disabled_server["disabled"] = True
+                server_config["cortex-relay"] = disabled_server
+                mcp_config["servers"] = server_config
+
+        if mcp_config:
+            config["mcp"] = mcp_config
 
         config["permission"] = _permission_policy(task.access)
         return config
@@ -489,18 +497,62 @@ class OpenCodeAdapter(ProviderAdapter):
 
     @staticmethod
     def _usage(events: list[dict[str, Any]]) -> dict[str, Any]:
-        for event in reversed(events):
+        step_parts: list[dict[str, Any]] = []
+        for event in events:
             if event.get("type") != "step_finish":
                 continue
             part = event.get("part")
-            if not isinstance(part, dict):
-                continue
+            if isinstance(part, dict):
+                step_parts.append(part)
+        if not step_parts:
+            return {}
+
+        if len(step_parts) == 1:
+            part = step_parts[0]
             usage: dict[str, Any] = {}
             for key in ("tokens", "cost", "modelID", "providerID", "reason"):
                 if key in part:
                     usage[key] = part[key]
             return usage
-        return {}
+
+        total_tokens: dict[str, Any] = {}
+        cache_totals: dict[str, int] = {}
+        has_tokens = False
+        total_cost = 0.0
+        has_cost = False
+
+        for part in step_parts:
+            tokens = part.get("tokens")
+            if isinstance(tokens, dict):
+                has_tokens = True
+                for key in ("input", "output", "reasoning", "total"):
+                    val = tokens.get(key)
+                    if isinstance(val, (int, float)) and not isinstance(val, bool):
+                        total_tokens[key] = int(total_tokens.get(key, 0)) + int(val)
+                cache = tokens.get("cache")
+                if isinstance(cache, dict):
+                    for ckey in ("read", "write"):
+                        cval = cache.get(ckey)
+                        if isinstance(cval, (int, float)) and not isinstance(cval, bool):
+                            cache_totals[ckey] = int(cache_totals.get(ckey, 0)) + int(cval)
+            cost = part.get("cost")
+            if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+                total_cost += float(cost)
+                has_cost = True
+
+        if cache_totals:
+            total_tokens["cache"] = cache_totals
+
+        usage = {}
+        if has_tokens:
+            usage["tokens"] = total_tokens
+        if has_cost:
+            usage["cost"] = total_cost
+        last_part = step_parts[-1]
+        for key in ("modelID", "providerID", "reason"):
+            if key in last_part:
+                usage[key] = last_part[key]
+        return usage
 
     @staticmethod
     def _parse_model_listing(
@@ -574,6 +626,37 @@ def _profile_options(task: TaskSpec) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _discover_configured_mcp_servers(workspace: Path | None = None) -> tuple[str, ...]:
+    candidates: list[Path] = []
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        candidates.append(Path(xdg) / "opencode" / "opencode.json")
+    candidates.append(Path.home() / ".config" / "opencode" / "opencode.json")
+    if workspace is not None:
+        candidates.append(workspace / "opencode.json")
+        candidates.append(workspace / ".opencode" / "opencode.json")
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for path in candidates:
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        mcp = parsed.get("mcp")
+        if not isinstance(mcp, dict):
+            continue
+        for key, value in mcp.items():
+            if key == "servers" or not isinstance(value, dict):
+                continue
+            if key not in seen:
+                seen.add(key)
+                names.append(key)
+    return tuple(names)
+
+
 def _permission_policy(access: str) -> dict[str, Any]:
     safe_bash = {
         "*": "ask",
@@ -613,6 +696,8 @@ def _permission_policy(access: str) -> dict[str, Any]:
         "external_directory": "deny",
         "task": "deny",
         "skill": "deny",
+        "todowrite": "deny",
+        "todoread": "deny",
         "webfetch": "deny",
         "websearch": "deny",
         "bash": safe_bash,
@@ -630,9 +715,21 @@ def _parse_json_object(value: str) -> dict[str, Any] | None:
                 text = text[5:].lstrip()
     try:
         parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
     except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            parsed = json.loads(text[start : end + 1])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            return None
+    return None
 
 
 def _write_host_model_state(state_home: Path, task: TaskSpec) -> None:

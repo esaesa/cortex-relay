@@ -93,19 +93,22 @@ class AntigravityAdapter(ProviderAdapter):
             "stream-json" if callable(task.metadata.get("_progress_line")) else "json",
             "--json-schema",
             json.dumps(RESULT_SCHEMA, separators=(",", ":")),
-            "--effort",
-            task.reasoning,
+            "--disable-slash-commands",
+            "--add-dir",
+            str(task.workspace),
             "--print-timeout",
             f"{task.timeout_seconds}s",
             "--sandbox",
         ]
+        if task.reasoning and task.reasoning != "default" and _supports_effort(task.model):
+            argv.extend(["--effort", task.reasoning])
         if task.model:
             argv.extend(["--model", task.model])
         return argv
 
     def execute(self, task: TaskSpec) -> TaskResult:
         capabilities = self.capabilities()
-        if task.reasoning not in capabilities.reasoning_levels:
+        if task.reasoning != "default" and task.reasoning not in capabilities.reasoning_levels:
             supported = ", ".join(capabilities.reasoning_levels)
             return TaskResult(
                 status="error",
@@ -245,6 +248,7 @@ class AntigravityAdapter(ProviderAdapter):
             "You are a delegated CortexRelay worker.\n\n"
             f"Role: {task.role}\n"
             f"Objective: {task.objective.strip()}\n"
+            f"Workspace: {task.workspace}\n"
             f"Access: {task.access}\n"
             f"{access_instruction}\n\n"
             "Acceptance criteria:\n"
@@ -347,3 +351,9 @@ def _looks_like_model_slug(value: str) -> bool:
     if value.startswith(("[", "{", "#")):
         return False
     return any(char.isdigit() for char in value) and any(char in value for char in ("-", "_"))
+
+
+def _supports_effort(model: str | None) -> bool:
+    if not isinstance(model, str):
+        return True
+    return not model.strip().lower().startswith("claude-")

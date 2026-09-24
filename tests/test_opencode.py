@@ -161,6 +161,74 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertEqual(config["permission"]["edit"], "deny")
         self.assertEqual(config["permission"]["webfetch"], "deny")
         self.assertEqual(config["permission"]["websearch"], "deny")
+        self.assertEqual(config["permission"]["todowrite"], "deny")
+        self.assertEqual(config["permission"]["todoread"], "deny")
+
+    def test_worker_disables_external_mcp_servers_from_user_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "opencode"
+            config_dir.mkdir(parents=True)
+            (config_dir / "opencode.json").write_text(
+                json.dumps(
+                    {
+                        "mcp": {
+                            "chrome-devtools": {"type": "local", "command": ["node", "server.js"]},
+                            "playwright": {"type": "local", "command": ["node", "pw.js"]},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {"XDG_CONFIG_HOME": tmp}, clear=False):
+                config = OpenCodeAdapter()._runtime_config(TaskSpec(objective="Review"))
+
+        self.assertEqual(config["mcp"]["chrome-devtools"], {"enabled": False})
+        self.assertEqual(config["mcp"]["playwright"], {"enabled": False})
+
+    def test_usage_aggregates_tokens_and_cost_across_all_steps(self):
+        events = [
+            {
+                "type": "step_finish",
+                "part": {
+                    "tokens": {
+                        "input": 5500,
+                        "output": 80,
+                        "reasoning": 36,
+                        "cache": {"read": 113, "write": 0},
+                        "total": 5729,
+                    },
+                    "cost": 0.002,
+                    "modelID": "muse-spark",
+                    "providerID": "opencode",
+                    "reason": "tool-calls",
+                },
+            },
+            {
+                "type": "step_finish",
+                "part": {
+                    "tokens": {
+                        "input": 815,
+                        "output": 130,
+                        "reasoning": 88,
+                        "cache": {"read": 5489, "write": 0},
+                        "total": 6522,
+                    },
+                    "cost": 0.003,
+                    "modelID": "muse-spark",
+                    "providerID": "opencode",
+                    "reason": "stop",
+                },
+            },
+        ]
+        usage = OpenCodeAdapter._usage(events)
+        self.assertEqual(usage["tokens"]["input"], 6315)
+        self.assertEqual(usage["tokens"]["output"], 210)
+        self.assertEqual(usage["tokens"]["reasoning"], 124)
+        self.assertEqual(usage["tokens"]["cache"]["read"], 5602)
+        self.assertEqual(usage["tokens"]["total"], 12251)
+        self.assertAlmostEqual(usage["cost"], 0.005)
+        self.assertEqual(usage["reason"], "stop")
+
 
     @patch("cortex_relay.providers.opencode.shutil.which", return_value="/usr/bin/opencode")
     def test_verbose_model_listing_supports_variant_validation(self, _which):

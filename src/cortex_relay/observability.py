@@ -28,8 +28,15 @@ def _task_locked(method):
     @wraps(method)
     def locked(self, workspace, task_or_id, *args, **kwargs):
         task_id = task_or_id.task_id if isinstance(task_or_id, ProgressEvent) else task_or_id
-        with self._task_lock(workspace, task_id):
+        try:
+            lock = self._task_lock(workspace, task_id)
+            lock.acquire()
+        except OSError:
+            return None
+        try:
             return method(self, workspace, task_or_id, *args, **kwargs)
+        finally:
+            lock.release()
 
     return locked
 
@@ -736,6 +743,14 @@ def summarize_usage(usage: dict[str, Any]) -> dict[str, Any]:
         usage,
         ("output_tokens", "outputTokens", "completion_tokens", "completionTokens"),
     )
+    cache_read_tokens = _first_number(
+        usage,
+        ("cache_read_tokens", "cached_input_tokens", "cacheReadTokens"),
+    )
+    cache_write_tokens = _first_number(
+        usage,
+        ("cache_write_tokens", "cache_creation_input_tokens", "cacheWriteTokens"),
+    )
     total_tokens = _first_number(
         usage,
         ("total_tokens", "totalTokens"),
@@ -753,6 +768,23 @@ def summarize_usage(usage: dict[str, Any]) -> dict[str, Any]:
             ("output", "output_tokens", "outputTokens", "completion"),
         )
         total_tokens = total_tokens or _first_number(tokens, ("total", "total_tokens"))
+        cache = tokens.get("cache")
+        if isinstance(cache, dict):
+            cache_read_tokens = cache_read_tokens or _first_number(cache, ("read",))
+            cache_write_tokens = cache_write_tokens or _first_number(cache, ("write",))
+
+    cache_total = int(cache_read_tokens or 0) + int(cache_write_tokens or 0)
+    raw_input = int(input_tokens or 0)
+    raw_output = int(output_tokens or 0)
+
+    if cache_total > 0:
+        if input_tokens is not None:
+            input_tokens = raw_input + cache_total
+        else:
+            input_tokens = cache_total
+        # Antigravity reports total_tokens = input_tokens + output_tokens excluding cache_read_tokens.
+        if total_tokens is not None and int(total_tokens) == raw_input + raw_output:
+            total_tokens = int(total_tokens) + cache_total
 
     if total_tokens is None and (input_tokens is not None or output_tokens is not None):
         total_tokens = int(input_tokens or 0) + int(output_tokens or 0)
@@ -760,6 +792,8 @@ def summarize_usage(usage: dict[str, Any]) -> dict[str, Any]:
     summary: dict[str, Any] = {}
     if input_tokens is not None:
         summary["input_tokens"] = int(input_tokens)
+    if cache_read_tokens is not None and int(cache_read_tokens) > 0:
+        summary["cache_read_tokens"] = int(cache_read_tokens)
     if output_tokens is not None:
         summary["output_tokens"] = int(output_tokens)
     if total_tokens is not None:

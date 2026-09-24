@@ -23,18 +23,40 @@ class AntigravityTests(unittest.TestCase):
     def test_command_uses_structured_output_and_sandbox(self):
         adapter = AntigravityAdapter()
         with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
             task = TaskSpec(
                 objective="Review auth",
-                workspace=Path(tmp),
+                workspace=workspace,
                 reasoning="medium",
                 model="gemini-3.8-flash-high",
             )
             command = adapter.command_for(task)
+            prompt = adapter._prompt(task)
         self.assertIn("--json-schema", command)
         self.assertIn("--output-format", command)
         self.assertIn("--sandbox", command)
+        self.assertIn("--disable-slash-commands", command)
+        self.assertIn("--add-dir", command)
+        add_dir_index = command.index("--add-dir") + 1
+        self.assertEqual(command[add_dir_index], str(workspace))
         self.assertIn("--effort", command)
         self.assertIn("--model", command)
+        self.assertIn(f"Workspace: {workspace}", prompt)
+
+    def test_claude_model_omits_unsupported_effort_flag(self):
+        adapter = AntigravityAdapter()
+        with tempfile.TemporaryDirectory() as tmp:
+            task = TaskSpec(
+                objective="Review auth",
+                workspace=Path(tmp),
+                reasoning="high",
+                model="claude-sonnet-4-6",
+            )
+            command = adapter.command_for(task)
+        self.assertNotIn("--effort", command)
+        self.assertIn("--model", command)
+        self.assertIn("claude-sonnet-4-6", command)
+
 
     @patch("cortex_relay.providers.antigravity.shutil.which", return_value="/usr/bin/agy")
     def test_successful_envelope_is_normalized(self, _which):

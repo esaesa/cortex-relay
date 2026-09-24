@@ -157,10 +157,42 @@ class ObservabilityTests(unittest.TestCase):
         self.assertEqual(opencode["total_tokens"], 30)
         self.assertEqual(opencode["cost"], 0.01)
 
+        opencode_cached = summarize_usage(
+            {
+                "tokens": {
+                    "input": 6315,
+                    "output": 209,
+                    "reasoning": 124,
+                    "cache": {"read": 5602, "write": 0},
+                    "total": 12250,
+                },
+                "cost": 0.0,
+            }
+        )
+        self.assertEqual(opencode_cached["input_tokens"], 11917)
+        self.assertEqual(opencode_cached["cache_read_tokens"], 5602)
+        self.assertEqual(opencode_cached["output_tokens"], 209)
+        self.assertEqual(opencode_cached["total_tokens"], 12250)
+
+        antigravity_cached = summarize_usage(
+            {
+                "input_tokens": 18080,
+                "cache_read_tokens": 15946,
+                "output_tokens": 226,
+                "thinking_tokens": 0,
+                "total_tokens": 18306,
+            }
+        )
+        self.assertEqual(antigravity_cached["input_tokens"], 34026)
+        self.assertEqual(antigravity_cached["cache_read_tokens"], 15946)
+        self.assertEqual(antigravity_cached["output_tokens"], 226)
+        self.assertEqual(antigravity_cached["total_tokens"], 34252)
+
         codex = summarize_usage(
             {"input_tokens": 100, "output_tokens": 25, "total_tokens": 125}
         )
         self.assertEqual(codex["total_tokens"], 125)
+
 
     def test_clear_completed_keeps_active_tasks(self):
         with tempfile.TemporaryDirectory() as tmp:
