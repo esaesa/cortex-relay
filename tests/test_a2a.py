@@ -33,6 +33,8 @@ class A2APolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cancel_event = threading.Event()
             policy = A2AServerPolicy(
+                profile="zen-luna",
+                preset="cheap",
                 provider="codex",
                 model="gpt-6-luna",
                 reasoning="max",
@@ -45,6 +47,8 @@ class A2APolicyTests(unittest.TestCase):
                 cancel_event=cancel_event,
             )
 
+        self.assertEqual(task.profile, "zen-luna")
+        self.assertEqual(task.preset, "cheap")
         self.assertEqual(task.provider, "codex")
         self.assertEqual(task.model, "gpt-6-luna")
         self.assertEqual(task.reasoning, "max")
@@ -112,6 +116,8 @@ class A2AInstalledRuntimeTests(unittest.TestCase):
 
         self.assertEqual(health.status_code, 200)
         self.assertEqual(health.json()["provider"], "codex")
+        self.assertIsNone(health.json()["profile"])
+        self.assertIsNone(health.json()["preset"])
         self.assertEqual(card.status_code, 200)
         payload = card.json()
         self.assertEqual(payload["name"], "cortex-relay")
