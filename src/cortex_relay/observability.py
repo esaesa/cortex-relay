@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from cortex_relay.core.models import TaskResult, TaskSpec
 from cortex_relay.runtime.progress import ProgressEvent
-from cortex_relay.runtime.state_lock import FileLock
+from cortex_relay.runtime.state_lock import FileLock, lock_is_held
 
 ACTIVE_STATUSES = {"routing", "preparing", "running", "fallback", "queued"}
 TERMINAL_STATUSES = {"success", "error", "timeout", "unavailable", "cancelled", "blocked", "interrupted"}
@@ -227,6 +227,71 @@ class RunStore:
         if result is None and record.get("status") in TERMINAL_STATUSES:
             raise ValueError(f"terminal task result is missing or corrupt: {task_id}")
         return result
+
+    def indexed_task_ids(self) -> list[str]:
+        directory = self.root / "task-index"
+        return [path.stem for path in directory.glob("*.json")] if directory.exists() else []
+
+    def owner_lock_path(self, owner_instance_id: str) -> Path:
+        if not re.fullmatch(r"[0-9a-f]{32}", owner_instance_id):
+            raise ValueError("invalid owner instance id")
+        return self.root / "owners" / f"{owner_instance_id}.lock"
+
+    @_task_locked
+    def record_owner_heartbeat(self, workspace: Path, task_id: str, owner_instance_id: str) -> None:
+        path = self._task_path(workspace, task_id)
+        record = self._read_record(path)
+        if not record or record.get("owner_instance_id") != owner_instance_id:
+            return
+        if record.get("status") in TERMINAL_STATUSES:
+            return
+        record["owner_heartbeat_at"] = _utc_now()
+        self._write_record(path, record, required=True)
+
+    @_task_locked
+    def reconcile_task(self, workspace: Path, task_id: str) -> dict[str, Any]:
+        path = self._task_path(workspace, task_id)
+        record = self._read_record(path)
+        if not record or record.get("task_id") != task_id:
+            raise ValueError(f"task record is missing or mismatched: {task_id}")
+        owner_id = record.get("owner_instance_id")
+        if not record.get("async") or record.get("status") in TERMINAL_STATUSES:
+            return record
+        if not isinstance(owner_id, str) or lock_is_held(self.owner_lock_path(owner_id)):
+            return record
+
+        result_path = self._result_path(workspace, task_id)
+        result = self._read_record(result_path)
+        if result_path.exists() and not _valid_stored_result(result):
+            raise ValueError(f"persisted task result is corrupt: {task_id}")
+        if result is None:
+            result = TaskResult(
+                status="interrupted", provider=str(record.get("provider") or "auto"),
+                model=record.get("model"),
+                summary="Task control was lost when its MCP owner stopped.",
+                error="No provider completion was observed; the worker was not resumed or killed.",
+                metadata={"task_id": task_id},
+            ).to_dict()
+            self._write_record(result_path, result, required=True)
+
+        now = _utc_now()
+        record.update(
+            status=result["status"], result_path=str(result_path),
+            completed_at=now, updated_at=now, process_alive=False,
+            summary=_truncate(str(result.get("summary") or ""), 420),
+            error=_truncate(str(result["error"]), 420) if result.get("error") else None,
+            provider=result.get("provider", record.get("provider")),
+            model=result.get("model", record.get("model")),
+            duration_seconds=result.get("duration_seconds"),
+            usage=result.get("usage") or {},
+            usage_summary=summarize_usage(result.get("usage") or {}),
+            tests=result.get("tests") or [],
+            changed_files=result.get("changed_files") or [],
+            risks=result.get("risks") or [],
+            conversation_id=result.get("conversation_id"),
+        )
+        self._write_record(path, record, required=True)
+        return record
 
     @_task_locked
     def update_task(
@@ -817,6 +882,15 @@ def _checked_lookup_id(value: str) -> str:
     if not isinstance(value, str) or not value or len(value) > 200 or any(ord(char) < 32 for char in value):
         raise ValueError("invalid task id")
     return value
+
+
+def _valid_stored_result(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("status") in TERMINAL_STATUSES
+        and isinstance(value.get("provider"), str)
+        and isinstance(value.get("summary"), str)
+    )
 
 
 def _utc_now() -> str:

@@ -6,13 +6,13 @@ from typing import Any
 
 from cortex_relay.core.models import TaskSpec
 from cortex_relay.core.registry import ProviderRegistry, default_registry
-from cortex_relay.runtime.async_tasks import AsyncTaskManager
+from cortex_relay.runtime.task_service import TaskService
 
 
 def create_server(
     registry: ProviderRegistry | None = None,
     *,
-    async_tasks: AsyncTaskManager | None = None,
+    async_tasks: TaskService | None = None,
 ) -> Any:
     """Create the optional MCP v2 server without importing MCP at package import time."""
 
@@ -24,7 +24,7 @@ def create_server(
         ) from exc
 
     runtime = registry or default_registry()
-    async_tasks = async_tasks or AsyncTaskManager(runtime)
+    async_tasks = async_tasks or TaskService(runtime)
     server = MCPServer(
         "CortexRelay",
         instructions=(
@@ -181,7 +181,7 @@ def run_mcp(
     registry: ProviderRegistry | None = None,
 ) -> None:
     runtime = registry or default_registry()
-    async_tasks = AsyncTaskManager(runtime)
+    async_tasks = TaskService(runtime)
     server = create_server(runtime, async_tasks=async_tasks)
     try:
         if transport == "stdio":
