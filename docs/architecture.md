@@ -133,6 +133,30 @@ User-level profile configuration is a base layer and project configuration overr
 
 Fallbacks are profile-to-profile edges. The default transition condition is provider unavailability, not arbitrary execution failure, so CortexRelay does not silently replace a failed implementation with a different writer unless the user explicitly opts into that policy.
 
+### Workflow artifacts and lineage
+
+Dependency edges are not assumed to imply filesystem state. A write worker's isolated worktree can be normalized into an immutable task artifact containing the exact binary patch and provenance. Downstream workers explicitly inherit that artifact into their own fresh worktree. This separates three concerns:
+
+```text
+ordering dependency
+        ↓
+immutable artifact lineage
+        ↓
+explicit source-checkout handoff
+```
+
+The scheduler never mutates the user's source checkout merely because one task depends on another. `task_apply` remains an explicit handoff after inspection.
+
+Every async task can carry a delegation context with trace/root/parent IDs, ancestry and depth. This gives provider-neutral loop protection independent of any host agent's native subagent controls.
+
+### Workflow scheduling and acceptance
+
+TaskService is the protocol-neutral workflow control plane. It manages durable task handles, dependency readiness, priorities, workspace/provider/profile concurrency limits, group/session budgets, artifact inheritance, and post-execution quality gates.
+
+Provider success and workflow acceptance are deliberately separate. A provider result may be normalized successfully but transition to `failed_gate` or `budget_exceeded` before dependent tasks are released.
+
+The task-control interface is defined as a protocol so the current custom MCP tools and a future native MCP Tasks adapter can share the same scheduler/persistence implementation.
+
 ### Workspace isolation
 
 Read-only tasks are instructed not to modify files, and all current runtime adapters compare git status before and after execution. Write-capable tasks can be isolated into linked git worktrees by the provider registry, so parallel writers do not share the same checkout.
