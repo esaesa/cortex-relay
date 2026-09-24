@@ -148,7 +148,8 @@ CortexRelay still uses standard host configuration:
 - `.codex/config.toml` or `~/.codex/config.toml` for Codex primary and global subagent defaults;
 - `.codex/agents/*.toml` or `~/.codex/agents/*.toml` for Codex custom roles;
 - repository or global `AGENTS.md` for Codex orchestration behavior;
-- `.gemini/settings.json`, `.gemini/agents/*.md`, and `GEMINI.md` for Gemini CLI;\n- `~/.cortex-relay/config.toml` and project `.cortex-relay/config.toml` for provider-neutral execution profiles, role mappings, presets, and fallback policy.
+- `.gemini/settings.json`, `.gemini/agents/*.md`, and `GEMINI.md` for Gemini CLI;
+- `~/.cortex-relay/config.toml` and project `.cortex-relay/config.toml` for provider-neutral execution profiles, role mappings, presets, and fallback policy.
 
 The configuration writers remain idempotent and back up managed files. The runtime is additive and does not replace host-native configuration.
 
