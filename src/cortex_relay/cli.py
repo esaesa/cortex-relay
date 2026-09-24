@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -87,6 +88,16 @@ def build_parser() -> argparse.ArgumentParser:
     models_parser.add_argument("--refresh", action="store_true")
     models_parser.add_argument("--verbose", action="store_true")
     models_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    launch_parser = subparsers.add_parser(
+        "launch",
+        help="Launch an interactive host agent from a configured orchestrator profile.",
+    )
+    launch_parser.add_argument("--role", default="orchestrator")
+    launch_parser.add_argument("--profile")
+    launch_parser.add_argument("--preset")
+    launch_parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    launch_parser.add_argument("--prompt")
 
     delegate_parser = subparsers.add_parser(
         "delegate",
@@ -277,6 +288,74 @@ def _models(args: argparse.Namespace) -> int:
         for model_id in sorted(models):
             print(f"  {model_id}")
     return 0
+
+
+def _launch(args: argparse.Namespace) -> int:
+    if importlib.util.find_spec("mcp") is None:
+        print(
+            'Interactive orchestrator launch requires MCP support. Install with: '
+            'pip install "cortex-relay[mcp]"',
+            file=sys.stderr,
+        )
+        return 2
+
+    registry = default_registry()
+    try:
+        config = registry.profiles.load(args.workspace)
+        selector = TaskSpec(
+            objective="Launch interactive CortexRelay orchestrator",
+            role=args.role,
+            profile=args.profile,
+            preset=args.preset,
+            workspace=args.workspace,
+        )
+        profile = config.profile_for_task(selector)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    if profile is None:
+        print(
+            f"No execution profile is configured for role {args.role!r}. "
+            "Set --profile or configure the role in .cortex-relay/config.toml.",
+            file=sys.stderr,
+        )
+        return 2
+    if profile.provider != "opencode":
+        print(
+            "Interactive host launch currently supports OpenCode profiles. "
+            f"Selected profile {profile.name!r} uses provider {profile.provider!r}.",
+            file=sys.stderr,
+        )
+        return 2
+
+    from .providers.opencode import OpenCodeAdapter
+
+    metadata = {
+        "profile_options": dict(profile.options),
+        "billing_class": profile.billing_class,
+    }
+    if args.prompt:
+        metadata["host_prompt"] = args.prompt
+
+    host_task = TaskSpec(
+        objective="Interactive CortexRelay orchestration session",
+        role=args.role,
+        profile=profile.name,
+        preset=args.preset,
+        provider=profile.provider,
+        workspace=args.workspace,
+        access=profile.access,
+        reasoning=profile.reasoning,
+        model=profile.model,
+        metadata=metadata,
+    )
+    adapter = OpenCodeAdapter()
+    try:
+        return adapter.launch_host(host_task)
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 def _delegate(args: argparse.Namespace) -> int:
@@ -496,6 +575,8 @@ def main(argv: list[str] | None = None) -> int:
         return _profiles(args)
     if args.command == "models":
         return _models(args)
+    if args.command == "launch":
+        return _launch(args)
     if args.command == "delegate":
         return _delegate(args)
     if args.command == "serve":
