@@ -26,7 +26,6 @@ dependencies = []
 
 [project.optional-dependencies]
 mcp = ["mcp>=2,<3"]
-runtime = ["mcp>=2,<3"]
 
 [project.urls]
 Homepage = "https://github.com/esaesa/cortex-relay"

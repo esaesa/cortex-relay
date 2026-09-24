@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument(
         "--runtime-only",
         action="store_true",
-        help="Skip generated configuration checks and only inspect runtime providers.",
+        help="Skip generated configuration checks and require a runtime provider.",
     )
 
     subparsers.add_parser("providers", help="List runtime providers and capabilities.")
@@ -78,6 +78,12 @@ def build_parser() -> argparse.ArgumentParser:
     delegate_parser.add_argument("--model")
     delegate_parser.add_argument("--accept", action="append", default=[], dest="acceptance_criteria")
     delegate_parser.add_argument("--timeout", type=int, default=300, dest="timeout_seconds")
+    delegate_parser.add_argument(
+        "--isolate-write",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use a temporary git worktree for workspace-write tasks (default: enabled).",
+    )
     delegate_parser.add_argument("--json", action="store_true", dest="as_json")
 
     serve_parser = subparsers.add_parser("serve", help="Expose CortexRelay to another coding agent.")
@@ -94,16 +100,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _doctor(provider: str, scope: str, project_dir: Path, *, runtime_only: bool) -> int:
-    checks = []
+    config = []
     if not runtime_only:
-        checks.extend(configuration_checks(provider=provider, scope=scope, project_dir=project_dir))
-    checks.extend(runtime_checks(default_registry()))
+        config = configuration_checks(provider=provider, scope=scope, project_dir=project_dir)
+    runtime = runtime_checks(default_registry())
 
     print("CortexRelay diagnostics:")
-    for check in checks:
-        marker = "OK" if check.ok else "MISSING"
-        print(f"  {marker:<7} {check.name}: {check.detail}")
-    return 0 if all(check.ok for check in checks) else 1
+    for check in [*config, *runtime]:
+        marker = "OK" if check.ok else ("MISSING" if check.name.startswith("config:") else "OPTIONAL")
+        print(f"  {marker:<8} {check.name}: {check.detail}")
+
+    if runtime_only:
+        return 0 if runtime and any(check.ok for check in runtime) else 1
+    return 0 if all(check.ok for check in config) else 1
 
 
 def _providers() -> int:
@@ -136,6 +145,7 @@ def _delegate(args: argparse.Namespace) -> int:
         model=args.model,
         acceptance_criteria=tuple(args.acceptance_criteria),
         timeout_seconds=args.timeout_seconds,
+        isolate_write=args.access == "workspace_write" and args.isolate_write,
     )
     result = default_registry().execute(task)
     if args.as_json:
@@ -162,6 +172,9 @@ def _delegate(args: argparse.Namespace) -> int:
             print("  risks:")
             for item in result.risks:
                 print(f"    - {item}")
+        if result.metadata.get("worktree_path"):
+            print(f"  worktree: {result.metadata['worktree_path']}")
+            print(f"  branch:   {result.metadata['worktree_branch']}")
     return 0 if result.ok else 1
 
 

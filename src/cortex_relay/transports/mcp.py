@@ -43,6 +43,7 @@ def create_server(registry: ProviderRegistry | None = None) -> Any:
         model: str | None = None,
         acceptance_criteria: list[str] | None = None,
         timeout_seconds: int = 300,
+        isolate_write: bool = True,
     ) -> dict[str, Any]:
         """Delegate one bounded task and return a normalized structured result."""
         task = _task_from_values(
@@ -55,12 +56,16 @@ def create_server(registry: ProviderRegistry | None = None) -> Any:
             model=model,
             acceptance_criteria=acceptance_criteria or [],
             timeout_seconds=timeout_seconds,
+            isolate_write=isolate_write,
         )
         return runtime.execute(task).to_dict()
 
     @server.tool()
     def delegate_parallel(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Execute independent delegated tasks concurrently."""
+        """Execute independent delegated tasks concurrently.
+
+        Write-capable tasks are isolated into git worktrees by default.
+        """
         specs = [_task_from_mapping(item) for item in tasks]
         if not specs:
             return []
@@ -103,6 +108,7 @@ def _task_from_mapping(data: dict[str, Any]) -> TaskSpec:
             if isinstance(item, str)
         ],
         timeout_seconds=int(data.get("timeout_seconds", 300)),
+        isolate_write=bool(data.get("isolate_write", True)),
     )
 
 
@@ -117,6 +123,7 @@ def _task_from_values(
     model: str | None,
     acceptance_criteria: list[str],
     timeout_seconds: int,
+    isolate_write: bool,
 ) -> TaskSpec:
     if access not in {"read_only", "workspace_write"}:
         raise ValueError("access must be read_only or workspace_write")
@@ -132,4 +139,5 @@ def _task_from_values(
         model=model,
         acceptance_criteria=tuple(acceptance_criteria),
         timeout_seconds=timeout_seconds,
+        isolate_write=access == "workspace_write" and isolate_write,
     )

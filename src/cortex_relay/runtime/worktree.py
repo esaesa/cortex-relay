@@ -29,7 +29,10 @@ class WorktreeManager:
         repository = repository.expanduser().resolve()
         safe_id = _SAFE_ID.sub("-", task_id).strip("-") or "task"
         branch = f"cortex/{safe_id}"
-        parent = (root or repository / ".cortex" / "worktrees").resolve()
+        parent = (
+            root
+            or repository.parent / ".cortex-worktrees" / repository.name
+        ).resolve()
         path = parent / safe_id
         path.parent.mkdir(parents=True, exist_ok=True)
 
