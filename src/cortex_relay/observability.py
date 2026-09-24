@@ -7,15 +7,27 @@ import time
 
 from dataclasses import asdict
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from cortex_relay.core.models import TaskResult, TaskSpec
 from cortex_relay.runtime.progress import ProgressEvent
+from cortex_relay.runtime.state_lock import FileLock
 
 ACTIVE_STATUSES = {"routing", "preparing", "running", "fallback"}
 TERMINAL_STATUSES = {"success", "error", "timeout", "unavailable", "cancelled"}
+
+
+def _task_locked(method):
+    @wraps(method)
+    def locked(self, workspace, task_or_id, *args, **kwargs):
+        task_id = task_or_id.task_id if isinstance(task_or_id, ProgressEvent) else task_or_id
+        with self._task_lock(workspace, task_id):
+            return method(self, workspace, task_or_id, *args, **kwargs)
+
+    return locked
 
 
 class RunStore:
@@ -139,6 +151,7 @@ class RunStore:
         self._write_record(self._task_path(task.workspace, task_id), record)
         return task_id
 
+    @_task_locked
     def update_task(
         self,
         workspace: Path,
@@ -151,6 +164,7 @@ class RunStore:
         record["updated_at"] = _utc_now()
         self._write_record(path, record)
 
+    @_task_locked
     def record_progress(self, workspace: Path, event: ProgressEvent) -> None:
         """Keep only bounded, observable activity for a running task."""
 
@@ -202,6 +216,7 @@ class RunStore:
             record["progress_files"] = list(dict.fromkeys([*known, *event.files]))[:100]
         self._write_record(path, record)
 
+    @_task_locked
     def record_heartbeat(self, workspace: Path, task_id: str, pid: int, alive: bool) -> None:
         path = self._task_path(workspace, task_id)
         record = self._read_record(path)
@@ -251,6 +266,7 @@ class RunStore:
         except OSError:
             pass
 
+    @_task_locked
     def complete_task(
         self,
         workspace: Path,
@@ -399,6 +415,9 @@ class RunStore:
 
     def _task_path(self, workspace: Path, task_id: str) -> Path:
         return self._workspace_dir(workspace) / "tasks" / f"{_safe_id(task_id)}.json"
+
+    def _task_lock(self, workspace: Path, task_id: str) -> FileLock:
+        return FileLock(self._workspace_dir(workspace) / "locks" / f"{_safe_id(task_id)}.lock")
 
     def _events_path(self, workspace: Path, task_id: str) -> Path:
         return self._workspace_dir(workspace) / "events" / f"{_safe_id(task_id)}.jsonl"
