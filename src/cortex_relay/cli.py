@@ -14,10 +14,9 @@ from .gemini import GEMINI_THINKING_LEVELS, GeminiConfigValues
 from .installer import install
 
 
-CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+CODEX_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 CONFIG_PROVIDERS = ("codex", "gemini")
 RUNTIME_ACCESS = ("read_only", "workspace_write")
-RUNTIME_REASONING = ("low", "medium", "high")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -38,8 +37,15 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--orchestrator-model")
     init_parser.add_argument("--worker-model")
 
-    init_parser.add_argument("--orchestrator-effort", choices=CODEX_EFFORTS)
-    init_parser.add_argument("--worker-effort", choices=CODEX_EFFORTS)
+    known_efforts = ", ".join(CODEX_EFFORTS)
+    init_parser.add_argument(
+        "--orchestrator-effort",
+        help=f"Codex effort. Current known values: {known_efforts}. New values are passed through.",
+    )
+    init_parser.add_argument(
+        "--worker-effort",
+        help=f"Codex effort. Current known values: {known_efforts}. New values are passed through.",
+    )
     init_parser.add_argument("--threads", type=int)
 
     init_parser.add_argument("--orchestrator-thinking", choices=GEMINI_THINKING_LEVELS)
@@ -74,8 +80,21 @@ def build_parser() -> argparse.ArgumentParser:
     delegate_parser.add_argument("--provider", default="auto")
     delegate_parser.add_argument("--workspace", type=Path, default=Path.cwd())
     delegate_parser.add_argument("--access", choices=RUNTIME_ACCESS, default="read_only")
-    delegate_parser.add_argument("--reasoning", choices=RUNTIME_REASONING, default="high")
-    delegate_parser.add_argument("--model")
+    delegate_parser.add_argument(
+        "--reasoning",
+        default="high",
+        help=(
+            "Provider reasoning effort. Passed through so newer provider effort names "
+            "can work without a CortexRelay release."
+        ),
+    )
+    delegate_parser.add_argument(
+        "--model",
+        help=(
+            "Provider model ID. Passed through unchanged; CortexRelay does not use a "
+            "fixed model allowlist."
+        ),
+    )
     delegate_parser.add_argument("--accept", action="append", default=[], dest="acceptance_criteria")
     delegate_parser.add_argument("--timeout", type=int, default=300, dest="timeout_seconds")
     delegate_parser.add_argument(
@@ -127,6 +146,12 @@ def _providers() -> int:
         print(f"  {item['name']}: {status}")
         print(f"    binary: {item['binary']}")
         print(f"    detail: {item['detail']}")
+        known_models = item.get("known_models") or ()
+        if known_models:
+            print(f"    known models: {', '.join(known_models)}")
+        reasoning_levels = item.get("reasoning_levels") or ()
+        if reasoning_levels:
+            print(f"    known efforts: {', '.join(reasoning_levels)}")
         print(
             "    features: structured_output={structured_output}, model_selection={model_selection}, "
             "reasoning_control={reasoning_control}, workspace_write={workspace_write}".format(**item)
@@ -219,8 +244,8 @@ def _codex_values(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     values = ConfigValues(
         orchestrator_model=args.orchestrator_model or "gpt-6-astra",
         orchestrator_effort=args.orchestrator_effort or "low",
-        worker_model=args.worker_model or "gpt-5.6-luna",
-        worker_effort=args.worker_effort or "xhigh",
+        worker_model=args.worker_model or "gpt-6-luna",
+        worker_effort=args.worker_effort or "max",
         max_threads=threads,
     )
     return "astra-luna", values
