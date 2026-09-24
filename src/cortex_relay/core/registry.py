@@ -214,6 +214,8 @@ class ProviderRegistry:
                     "status": result.status,
                     "error": result.error,
                     "worktree_path": result.metadata.get("worktree_path"),
+                    "worktree_branch": result.metadata.get("worktree_branch"),
+                    "worktree_base_commit": result.metadata.get("worktree_base_commit"),
                 }
             )
             result = self._with_routing_metadata(
@@ -320,7 +322,7 @@ class ProviderRegistry:
                 {
                     "attempt": attempt,
                     "profile": task.profile,
-                    "source_repository": str(task.workspace.resolve()),
+                    "source_repository": str(worktree.source_repository or task.workspace.resolve()),
                     "path": str(worktree.path),
                     "branch": worktree.branch,
                     "base_commit": worktree.base_commit,

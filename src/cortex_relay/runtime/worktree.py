@@ -15,6 +15,7 @@ class Worktree:
     path: Path
     branch: str
     base_commit: str = ""
+    source_repository: Path | None = None
 
 
 class WorktreeManager:
@@ -33,6 +34,10 @@ class WorktreeManager:
         root: Path | None = None,
     ) -> Worktree:
         repository = repository.expanduser().resolve()
+        repository = Path(subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=repository,
+            check=True, text=True, capture_output=True,
+        ).stdout.strip()).resolve()
         if attempt < 1:
             raise ValueError("worktree attempt must be positive")
         safe_id = (_SAFE_ID.sub("-", task_id).strip("-") or "task") + f"-a{attempt}"
@@ -59,7 +64,10 @@ class WorktreeManager:
                 text=True,
                 capture_output=True,
             )
-        return Worktree(path=path, branch=branch, base_commit=base_commit)
+        return Worktree(
+            path=path, branch=branch, base_commit=base_commit,
+            source_repository=repository,
+        )
 
     def remove(self, repository: Path, worktree: Worktree, *, force: bool = False) -> None:
         argv = ["git", "worktree", "remove"]

@@ -15,6 +15,7 @@ from cortex_relay.core.models import TaskResult, TaskSpec
 from cortex_relay.core.registry import ProviderRegistry
 from cortex_relay.observability import TERMINAL_STATUSES
 from cortex_relay.runtime.state_lock import FileLock
+from cortex_relay.runtime.worktree_handoff import WorktreeHandoff
 
 
 @dataclass
@@ -33,6 +34,7 @@ class TaskService:
     def __init__(self, registry: ProviderRegistry, *, max_workers: int = 4) -> None:
         self.registry = registry
         self.store = registry.run_store
+        self.handoff = WorktreeHandoff(self.store)
         self.owner_instance_id = uuid4().hex
         self._owner_lock = FileLock(self.store.owner_lock_path(self.owner_instance_id))
         self._owner_lock.acquire()
@@ -256,6 +258,20 @@ class TaskService:
             key=lambda item: (str(item.get("started_at", "")), str(item.get("task_id", ""))),
             reverse=group_id is None,
         )
+
+    def worktree(self, task_id: str, attempt: int | None = None) -> dict[str, Any]:
+        return self.handoff.worktree(task_id, attempt)
+
+    def diff(self, task_id: str, attempt: int | None = None,
+             max_bytes: int = 65536) -> dict[str, Any]:
+        return self.handoff.diff(task_id, attempt, max_bytes)
+
+    def apply(self, task_id: str, attempt: int | None = None) -> dict[str, Any]:
+        return self.handoff.apply(task_id, attempt)
+
+    def discard(self, task_id: str, attempt: int | None = None,
+                confirmation_token: str | None = None) -> dict[str, Any]:
+        return self.handoff.discard(task_id, attempt, confirmation_token)
 
     def shutdown(self) -> None:
         with self._lock:

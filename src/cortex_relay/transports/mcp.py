@@ -171,8 +171,30 @@ def create_server(
 
     @server.tool()
     def tasks(workspace: str = ".", group_id: str | None = None) -> list[dict[str, Any]]:
-        """List async delegations started by this MCP server for a workspace."""
+        """List persisted async delegations for a workspace, optionally by group."""
         return async_tasks.tasks(Path(workspace), group_id=group_id)
+
+    @server.tool()
+    def task_worktree(task_id: str, attempt: int | None = None) -> dict[str, Any]:
+        """Inspect an isolated worktree recorded for a delegated task."""
+        return async_tasks.worktree(task_id, attempt)
+
+    @server.tool()
+    def task_diff(task_id: str, attempt: int | None = None,
+                  max_bytes: int = 65536) -> dict[str, Any]:
+        """Preview committed and uncommitted worker changes with a size limit."""
+        return async_tasks.diff(task_id, attempt, max_bytes)
+
+    @server.tool()
+    def task_apply(task_id: str, attempt: int | None = None) -> dict[str, Any]:
+        """Apply a completed worker's full patch to a clean source checkout."""
+        return async_tasks.apply(task_id, attempt)
+
+    @server.tool()
+    def task_discard(task_id: str, attempt: int | None = None,
+                     confirmation_token: str | None = None) -> dict[str, Any]:
+        """Prepare or confirm removal of a completed managed worktree."""
+        return async_tasks.discard(task_id, attempt, confirmation_token)
 
     return server
 

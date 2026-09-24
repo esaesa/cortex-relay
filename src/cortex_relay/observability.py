@@ -331,6 +331,26 @@ class RunStore:
         self._write_record(path, record, required=True)
 
     @_task_locked
+    def update_worktree_attempt(
+        self, workspace: Path, task_id: str, number: int, **updates: Any
+    ) -> dict[str, Any]:
+        path = self._task_path(workspace, task_id)
+        record = self._read_record(path)
+        if not record or record.get("task_id") != task_id:
+            raise ValueError(f"task record is missing or mismatched: {task_id}")
+        attempts = list(record.get("worktree_attempts") or [])
+        for index, attempt in enumerate(attempts):
+            if attempt.get("attempt") == number:
+                changed = {**attempt, **updates}
+                attempts[index] = changed
+                record["worktree_attempts"] = attempts
+                record["handoff_status"] = changed.get("handoff_status")
+                record["updated_at"] = _utc_now()
+                self._write_record(path, record, required=True)
+                return changed
+        raise ValueError(f"unknown worktree attempt: {task_id}/{number}")
+
+    @_task_locked
     def record_progress(self, workspace: Path, event: ProgressEvent) -> None:
         """Keep only bounded, observable activity for a running task."""
 
