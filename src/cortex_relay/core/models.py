@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 
 TaskAccess = Literal["read_only", "workspace_write"]
-TaskStatus = Literal["success", "error", "timeout", "unavailable", "cancelled"]
+TaskStatus = Literal["success", "error", "timeout", "unavailable", "cancelled", "blocked", "interrupted"]
 ReasoningLevel = str
 
 _REASONING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")

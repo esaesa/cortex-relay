@@ -118,18 +118,16 @@ class ProviderRegistry:
 
         result_metadata = dict(result.metadata)
         result_metadata["task_id"] = task_id
-        result = replace(result, metadata=result_metadata)
-
-        record = self.run_store.complete_task(source_workspace, task_id, result)
-        result_metadata = dict(result.metadata)
         result_metadata["observability"] = {
             "task_id": task_id,
-            "session_id": record.get("session_id"),
+            "session_id": (self.run_store.get_task(source_workspace, task_id) or {}).get("session_id"),
             "status": result.status,
             "dashboard_command": "cortex-relay status --watch",
             "history_command": "cortex-relay history",
         }
-        return replace(result, metadata=result_metadata)
+        result = replace(result, metadata=result_metadata)
+        self.run_store.complete_task(source_workspace, task_id, result)
+        return result
 
     def status_snapshot(
         self,

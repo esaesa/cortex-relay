@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 
 from dataclasses import asdict
@@ -16,8 +17,9 @@ from cortex_relay.core.models import TaskResult, TaskSpec
 from cortex_relay.runtime.progress import ProgressEvent
 from cortex_relay.runtime.state_lock import FileLock
 
-ACTIVE_STATUSES = {"routing", "preparing", "running", "fallback"}
-TERMINAL_STATUSES = {"success", "error", "timeout", "unavailable", "cancelled"}
+ACTIVE_STATUSES = {"routing", "preparing", "running", "fallback", "queued"}
+TERMINAL_STATUSES = {"success", "error", "timeout", "unavailable", "cancelled", "blocked", "interrupted"}
+_TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
 
 def _task_locked(method):
@@ -96,14 +98,27 @@ class RunStore:
         task: TaskSpec,
         *,
         task_id: str | None = None,
+        async_task: bool = False,
+        owner_instance_id: str | None = None,
+        group_id: str | None = None,
+        depends_on: tuple[str, ...] = (),
     ) -> str:
-        task_id = task_id or f"{task.role}-{uuid4().hex[:10]}"
+        task_id = _validated_task_id(task_id or f"task-{uuid4().hex}")
+        path = self._task_path(task.workspace, task_id)
+        if path.exists():
+            raise FileExistsError(f"task id already exists: {task_id}")
         now = _utc_now()
         session = _session_from_environment()
         record = {
             "schema_version": 1,
             "kind": "task",
             "task_id": task_id,
+            "async": async_task,
+            "owner_instance_id": owner_instance_id,
+            "owner_heartbeat_at": now if owner_instance_id else None,
+            "group_id": group_id,
+            "depends_on": list(depends_on),
+            "blocked_by": [],
             "session_id": session.get("session_id"),
             "host_profile": session.get("host_profile"),
             "host_model": session.get("host_model"),
@@ -123,6 +138,9 @@ class RunStore:
             "attempts": [],
             "worktree_path": None,
             "worktree_branch": None,
+            "worktree_attempts": [],
+            "handoff_status": None,
+            "result_path": None,
             "started_at": now,
             "updated_at": now,
             "completed_at": None,
@@ -148,8 +166,67 @@ class RunStore:
             "process_alive": False,
             "last_heartbeat_at": None,
         }
-        self._write_record(self._task_path(task.workspace, task_id), record)
+        self._write_record(path, record, required=async_task)
+        if async_task:
+            index = {
+                "schema_version": 1,
+                "task_id": task_id,
+                "workspace": str(_workspace(task.workspace)),
+                "created_at": now,
+            }
+            try:
+                self._write_record(self._index_path(task_id), index, required=True)
+            except OSError:
+                path.unlink(missing_ok=True)
+                raise
         return task_id
+
+    def find_task(self, task_id: str) -> tuple[Path, dict[str, Any]]:
+        """Resolve a task handle without a process-local future."""
+
+        _checked_lookup_id(task_id)
+        index_path = self._index_path(task_id) if _TASK_ID.fullmatch(task_id) else None
+        if index_path is not None and index_path.exists():
+            index = self._read_record(index_path)
+            if not index or index.get("task_id") != task_id:
+                raise ValueError(f"invalid task index: {task_id}")
+            workspace_value = index.get("workspace")
+            if not isinstance(workspace_value, str):
+                raise ValueError(f"task index lacks workspace: {task_id}")
+            workspace = _workspace(Path(workspace_value))
+            record = self.get_task(workspace, task_id)
+            if not record or record.get("task_id") != task_id or record.get("workspace") != str(workspace):
+                raise ValueError(f"task index does not match its record: {task_id}")
+            return workspace, record
+
+        matches: list[tuple[Path, dict[str, Any]]] = []
+        for directory in self.root.glob("*/tasks"):
+            for path in directory.glob("*.json"):
+                record = self._read_record(path)
+                if not record or record.get("task_id") != task_id:
+                    continue
+                workspace_value = record.get("workspace")
+                if isinstance(workspace_value, str):
+                    workspace = _workspace(Path(workspace_value))
+                    if self._task_path(workspace, task_id) == path:
+                        matches.append((workspace, record))
+        if len(matches) != 1:
+            raise ValueError(f"unknown or ambiguous task id: {task_id}")
+        return matches[0]
+
+    def get_result(self, workspace: Path, task_id: str) -> dict[str, Any] | None:
+        record = self.get_task(workspace, task_id)
+        if not record:
+            return None
+        path = self._result_path(workspace, task_id)
+        if record.get("result_path") and record["result_path"] != str(path):
+            raise ValueError(f"task result path does not match its record: {task_id}")
+        if not path.exists() and not record.get("result_path"):
+            return None
+        result = self._read_record(path)
+        if result is None and record.get("status") in TERMINAL_STATUSES:
+            raise ValueError(f"terminal task result is missing or corrupt: {task_id}")
+        return result
 
     @_task_locked
     def update_task(
@@ -160,6 +237,8 @@ class RunStore:
     ) -> None:
         path = self._task_path(workspace, task_id)
         record = self._read_record(path) or {}
+        if record.get("task_id") != task_id:
+            raise ValueError(f"task record is missing or mismatched: {task_id}")
         record.update(updates)
         record["updated_at"] = _utc_now()
         self._write_record(path, record)
@@ -275,12 +354,17 @@ class RunStore:
     ) -> dict[str, Any]:
         path = self._task_path(workspace, task_id)
         record = self._read_record(path) or {}
+        if record.get("task_id") != task_id:
+            raise ValueError(f"task record is missing or mismatched: {task_id}")
         now = _utc_now()
         usage_summary = summarize_usage(result.usage)
         metadata = result.metadata
+        result_path = self._result_path(workspace, task_id)
+        self._write_record(result_path, result.to_dict(), required=True)
         record.update(
             {
                 "status": result.status,
+                "result_path": str(result_path),
                 "process_alive": False,
                 "provider": result.provider,
                 "model": result.model,
@@ -295,14 +379,14 @@ class RunStore:
                 "summary": _truncate(result.summary, 420),
                 "error": _truncate(result.error, 420) if result.error else None,
                 "conversation_id": result.conversation_id,
-                "worktree_path": metadata.get("worktree_path"),
-                "worktree_branch": metadata.get("worktree_branch"),
+                "worktree_path": metadata.get("worktree_path", record.get("worktree_path")),
+                "worktree_branch": metadata.get("worktree_branch", record.get("worktree_branch")),
                 "attempts": metadata.get("routing_attempts", record.get("attempts", [])),
                 "billing_class": metadata.get("billing_class", record.get("billing_class")),
                 "profile": metadata.get("profile", record.get("profile")),
             }
         )
-        self._write_record(path, record)
+        self._write_record(path, record, required=True)
         return record
 
     def list_tasks(
@@ -323,7 +407,9 @@ class RunStore:
         return records[: max(1, limit)]
 
     def get_task(self, workspace: Path, task_id: str) -> dict[str, Any] | None:
-        return self._read_record(self._task_path(workspace, task_id))
+        _checked_lookup_id(task_id)
+        record = self._read_record(self._task_path(workspace, task_id))
+        return record if record and record.get("task_id") == task_id else None
 
     def list_sessions(
         self,
@@ -398,11 +484,22 @@ class RunStore:
         for path in directory.glob("*.json"):
             record = self._read_record(path)
             if record and record.get("status") in TERMINAL_STATUSES:
+                task_id = record.get("task_id")
+                if not isinstance(task_id, str) or path != self._task_path(workspace, task_id):
+                    continue
                 try:
-                    path.unlink()
-                    task_id = record.get("task_id")
-                    if isinstance(task_id, str):
+                    with self._task_lock(workspace, task_id):
+                        current = self._read_record(path)
+                        if not current or current.get("status") not in TERMINAL_STATUSES:
+                            continue
+                        path.unlink()
                         self._events_path(workspace, task_id).unlink(missing_ok=True)
+                        self._result_path(workspace, task_id).unlink(missing_ok=True)
+                        if _TASK_ID.fullmatch(task_id):
+                            index_path = self._index_path(task_id)
+                            index = self._read_record(index_path)
+                            if index and index.get("workspace") == str(_workspace(workspace)):
+                                index_path.unlink(missing_ok=True)
                     removed += 1
                 except OSError:
                     pass
@@ -416,6 +513,12 @@ class RunStore:
     def _task_path(self, workspace: Path, task_id: str) -> Path:
         return self._workspace_dir(workspace) / "tasks" / f"{_safe_id(task_id)}.json"
 
+    def _index_path(self, task_id: str) -> Path:
+        return self.root / "task-index" / f"{_validated_task_id(task_id)}.json"
+
+    def _result_path(self, workspace: Path, task_id: str) -> Path:
+        return self._workspace_dir(workspace) / "results" / f"{_safe_id(task_id)}.json"
+
     def _task_lock(self, workspace: Path, task_id: str) -> FileLock:
         return FileLock(self._workspace_dir(workspace) / "locks" / f"{_safe_id(task_id)}.lock")
 
@@ -425,7 +528,7 @@ class RunStore:
     def _session_path(self, workspace: Path, session_id: str) -> Path:
         return self._workspace_dir(workspace) / "sessions" / f"{_safe_id(session_id)}.json"
 
-    def _write_record(self, path: Path, record: dict[str, Any]) -> None:
+    def _write_record(self, path: Path, record: dict[str, Any], *, required: bool = False) -> None:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             temporary = path.with_suffix(path.suffix + f".{os.getpid()}.{uuid4().hex}.tmp")
@@ -435,6 +538,8 @@ class RunStore:
             )
             temporary.replace(path)
         except OSError:
+            if required:
+                raise
             return
 
     @staticmethod
@@ -700,6 +805,18 @@ def _workspace(value: Path) -> Path:
 
 def _safe_id(value: str) -> str:
     return "".join(char for char in value if char.isalnum() or char in "-_.")[:96] or "unknown"
+
+
+def _validated_task_id(value: str) -> str:
+    if not isinstance(value, str) or not _TASK_ID.fullmatch(value):
+        raise ValueError("task_id must be an alphanumeric handle of at most 96 characters")
+    return value
+
+
+def _checked_lookup_id(value: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 200 or any(ord(char) < 32 for char in value):
+        raise ValueError("invalid task id")
+    return value
 
 
 def _utc_now() -> str:
