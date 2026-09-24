@@ -146,6 +146,35 @@ class WorktreeHandoff:
         return {"patch": patch, "patch_sha256": _sha(patch), "files": files,
                 "worker_head": info["head"]}
 
+    def artifact_snapshot(
+        self, task_id: str, attempt: int | None = None
+    ) -> dict[str, Any]:
+        """Return the exact managed worker patch for internal artifact persistence."""
+
+        workspace, record, item = self._select(task_id, attempt)
+        self._require_terminal(record)
+        info = self._inspect(workspace, record, item, managed=True)
+        snapshot = self._snapshot(info)
+        excluded = self._excluded_ignored_files(record, info, snapshot["files"])
+        if excluded:
+            raise ValueError(
+                "worker snapshot is incomplete because provider-reported files are ignored by Git: "
+                + ", ".join(excluded)
+            )
+        return {
+            "workspace": workspace,
+            "record": record,
+            "attempt": item.get("attempt"),
+            "source_repository": info["source_repository"],
+            "worktree_path": info["path"],
+            "branch": info["branch"],
+            "base_commit": info["base_commit"],
+            "worker_head": snapshot["worker_head"],
+            "patch": snapshot["patch"],
+            "patch_sha256": snapshot["patch_sha256"],
+            "files": snapshot["files"],
+        }
+
     def diff(self, task_id: str, attempt: int | None = None,
              max_bytes: int = 65536) -> dict[str, Any]:
         if not 1024 <= max_bytes <= 262144:
