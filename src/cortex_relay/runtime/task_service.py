@@ -35,7 +35,7 @@ class _Job:
 class TaskService:
     """Control local jobs and recover observable state from disk."""
 
-    def __init__(self, registry: ProviderRegistry, *, max_workers: int = 16) -> None:
+    def __init__(self, registry: ProviderRegistry, *, max_workers: int = 64) -> None:
         self.registry = registry
         self.store = registry.run_store
         self.handoff = WorktreeHandoff(self.store)
@@ -256,11 +256,14 @@ class TaskService:
             ]
             pending.sort(
                 key=lambda item: (
-                    item[1].priority,
-                    -len(self.store.get_task(item[1].workspace, item[0]) or {}),
+                    -item[1].priority,
+                    str(
+                        (
+                            self.store.get_task(item[1].workspace, item[0]) or {}
+                        ).get("started_at", "")
+                    ),
                     item[0],
-                ),
-                reverse=True,
+                )
             )
 
             running = [
