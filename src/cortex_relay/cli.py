@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 
 from . import __version__
@@ -93,6 +94,27 @@ def build_parser() -> argparse.ArgumentParser:
     profiles_parser.add_argument("--workspace", type=Path, default=Path.cwd())
     profiles_parser.add_argument("--preset")
     profiles_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show live CortexRelay delegation status for this workspace.",
+    )
+    status_parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    status_parser.add_argument("--limit", type=int, default=12)
+    status_parser.add_argument("--watch", action="store_true")
+    status_parser.add_argument("--interval", type=float, default=1.0)
+    status_parser.add_argument("--active-only", action="store_true")
+    status_parser.add_argument("--json", action="store_true", dest="as_json")
+    status_parser.add_argument("--clear-completed", action="store_true")
+
+    history_parser = subparsers.add_parser(
+        "history",
+        help="Show completed CortexRelay delegations for this workspace.",
+    )
+    history_parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    history_parser.add_argument("--limit", type=int, default=30)
+    history_parser.add_argument("--json", action="store_true", dest="as_json")
+    history_parser.add_argument("--clear", action="store_true")
 
     models_parser = subparsers.add_parser(
         "models",
@@ -303,6 +325,66 @@ def _profiles(args: argparse.Namespace) -> int:
     return 0
 
 
+def _status(args: argparse.Namespace, *, completed_only: bool = False) -> int:
+    from .observability import RunStore, render_dashboard
+
+    if args.limit < 1:
+        print("--limit must be at least 1", file=sys.stderr)
+        return 2
+
+    store = RunStore()
+    clear_requested = bool(
+        getattr(args, "clear_completed", False) or getattr(args, "clear", False)
+    )
+    if clear_requested:
+        removed = store.clear_completed(args.workspace)
+        print(f"Cleared {removed} completed CortexRelay task record(s).")
+        if completed_only or not getattr(args, "watch", False):
+            return 0
+
+    if getattr(args, "watch", False) and args.as_json:
+        print("--watch cannot be combined with --json", file=sys.stderr)
+        return 2
+
+    interval = float(getattr(args, "interval", 1.0))
+    if interval < 0.2:
+        print("--interval must be at least 0.2 seconds", file=sys.stderr)
+        return 2
+
+    def snapshot():
+        return store.snapshot(
+            args.workspace,
+            limit=args.limit,
+            active_only=bool(getattr(args, "active_only", False)),
+            completed_only=completed_only,
+        )
+
+    if args.as_json:
+        print(json.dumps(snapshot(), indent=2, ensure_ascii=False))
+        return 0
+
+    if not getattr(args, "watch", False):
+        print(
+            render_dashboard(
+                snapshot(),
+                title="CortexRelay history" if completed_only else "CortexRelay status",
+                completed_only=completed_only,
+            )
+        )
+        return 0
+
+    try:
+        while True:
+            view = render_dashboard(snapshot(), title="CortexRelay live status")
+            if sys.stdout.isatty():
+                print("\033[2J\033[H", end="")
+            print(view)
+            print("\nWatching for changes. Ctrl+C to exit.")
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return 0
+
+
 def _models(args: argparse.Namespace) -> int:
     if args.provider != "opencode":
         print(f"unsupported model discovery provider: {args.provider}", file=sys.stderr)
@@ -373,9 +455,22 @@ def _launch(args: argparse.Namespace) -> int:
 
     from .providers.opencode import OpenCodeAdapter
 
+    from .observability import RunStore
+
+    run_store = RunStore()
+    session_id = run_store.start_session(
+        args.workspace,
+        profile=profile.name,
+        provider=profile.provider,
+        model=profile.model,
+        reasoning=profile.reasoning,
+        preset=args.preset,
+    )
+
     metadata = {
         "profile_options": dict(profile.options),
         "billing_class": profile.billing_class,
+        "session_id": session_id,
     }
     if args.prompt:
         metadata["host_prompt"] = args.prompt
@@ -393,11 +488,21 @@ def _launch(args: argparse.Namespace) -> int:
         metadata=metadata,
     )
     adapter = OpenCodeAdapter()
+    exit_code = 2
     try:
-        return adapter.launch_host(host_task)
+        print(f"CortexRelay session: {session_id}")
+        print("Live dashboard: open another terminal and run 'cortex-relay status --watch'")
+        exit_code = adapter.launch_host(host_task)
+        return exit_code
     except (RuntimeError, ValueError, OSError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    finally:
+        run_store.end_session(
+            args.workspace,
+            session_id,
+            exit_code=exit_code,
+        )
 
 
 def _delegate(args: argparse.Namespace) -> int:
@@ -443,6 +548,9 @@ def _delegate(args: argparse.Namespace) -> int:
         if result.metadata.get("worktree_path"):
             print(f"  worktree: {result.metadata['worktree_path']}")
             print(f"  branch:   {result.metadata['worktree_branch']}")
+        observability = result.metadata.get("observability")
+        if isinstance(observability, dict):
+            print(f"  task id:  {observability.get('task_id')}")
     return 0 if result.ok else 1
 
 
@@ -619,6 +727,10 @@ def main(argv: list[str] | None = None) -> int:
         return _config_runtime(args)
     if args.command == "profiles":
         return _profiles(args)
+    if args.command == "status":
+        return _status(args)
+    if args.command == "history":
+        return _status(args, completed_only=True)
     if args.command == "models":
         return _models(args)
     if args.command == "launch":

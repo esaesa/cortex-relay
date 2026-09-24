@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from cortex_relay.core.models import Evidence, TaskResult, TaskSpec
-from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner
+from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner, prepare_process_argv
 
 from .base import ProviderAdapter, ProviderCapabilities
 from .result_schema import RESULT_SCHEMA
@@ -101,6 +101,16 @@ class OpenCodeAdapter(ProviderAdapter):
         env = dict(os.environ)
         env["OPENCODE_CLIENT"] = "cortex-relay-orchestrator"
 
+        session_id = task.metadata.get("session_id")
+        if isinstance(session_id, str) and session_id.strip():
+            env["CORTEX_RELAY_SESSION_ID"] = session_id.strip()
+        if task.profile:
+            env["CORTEX_RELAY_HOST_PROFILE"] = task.profile
+        if task.model:
+            env["CORTEX_RELAY_HOST_MODEL"] = task.model
+        env["CORTEX_RELAY_HOST_REASONING"] = task.reasoning
+        env["CORTEX_RELAY_WORKSPACE"] = str(task.workspace)
+
         config: dict[str, Any] = {}
         raw = os.environ.get("OPENCODE_CONFIG_CONTENT")
         if raw:
@@ -158,7 +168,7 @@ class OpenCodeAdapter(ProviderAdapter):
             raise RuntimeError(variant_error)
 
         completed = subprocess.run(
-            self.host_command(task),
+            prepare_process_argv(self.host_command(task)),
             cwd=task.workspace,
             env=self.host_environment(task),
             check=False,

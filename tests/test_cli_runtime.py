@@ -166,6 +166,76 @@ class CLIRuntimeTests(unittest.TestCase):
         self.assertIn("reviewer: zen-luna", rendered)
         self.assertIn("zen-luna: opencode / opencode/gpt-6-luna / max", rendered)
 
+    def test_status_command_renders_dashboard(self):
+        snapshot = {
+            "workspace": "/repo",
+            "sessions": [],
+            "summary": {
+                "active": 1,
+                "success": 0,
+                "failed": 0,
+                "total_tokens": 0,
+                "cost": None,
+            },
+            "tasks": [
+                {
+                    "status": "running",
+                    "role": "implementer",
+                    "profile": "worker",
+                    "provider": "opencode",
+                    "model": "opencode/gpt-6-luna",
+                    "reasoning": "max",
+                    "objective": "Implement feature",
+                    "started_at": "2026-09-24T15:00:00+00:00",
+                    "usage_summary": {},
+                    "tests": [],
+                    "changed_files": [],
+                }
+            ],
+        }
+
+        class FakeStore:
+            def snapshot(self, *args, **kwargs):
+                return snapshot
+
+            def clear_completed(self, _workspace):
+                return 0
+
+        output = io.StringIO()
+        with patch("cortex_relay.observability.RunStore", return_value=FakeStore()):
+            with redirect_stdout(output):
+                code = main(["status"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("CortexRelay status", output.getvalue())
+        self.assertIn("implementer", output.getvalue())
+        self.assertIn("gpt-6-luna/max", output.getvalue())
+
+    def test_history_json_requests_completed_only(self):
+        calls = []
+
+        class FakeStore:
+            def snapshot(self, *args, **kwargs):
+                calls.append(kwargs)
+                return {
+                    "workspace": "/repo",
+                    "sessions": [],
+                    "summary": {},
+                    "tasks": [],
+                }
+
+            def clear_completed(self, _workspace):
+                return 0
+
+        output = io.StringIO()
+        with patch("cortex_relay.observability.RunStore", return_value=FakeStore()):
+            with redirect_stdout(output):
+                code = main(["history", "--json"])
+
+        self.assertEqual(code, 0)
+        self.assertTrue(calls[0]["completed_only"])
+        self.assertIn('"tasks": []', output.getvalue())
+
     def test_models_command_uses_opencode_discovery(self):
         output = io.StringIO()
         with patch(

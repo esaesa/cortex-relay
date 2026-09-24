@@ -1,6 +1,6 @@
 # Runtime delegation
 
-CortexRelay 0.7 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI through the same provider-neutral runtime, with direct CLI, MCP, and A2A frontends.
+CortexRelay 0.8 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI through the same provider-neutral runtime, with direct CLI, MCP, and A2A frontends.
 
 The primary coding agent remains the orchestrator. CortexRelay does not attempt to replace its planning loop. It receives an already-bounded task, applies deterministic routing policy, executes the selected provider, and returns a compact normalized result.
 
@@ -68,6 +68,68 @@ cortex-relay launch
 `config` edits the project or user config interactively. It supports role reassignment, profile editing/creation, and active-preset selection. If no config exists, it starts `setup`.
 
 `launch` already defaults to `--role orchestrator`, so normal day-to-day use does not need the role flag.
+
+## Runtime observability
+
+Every delegation is assigned a task ID and recorded through a provider-neutral lifecycle:
+
+```text
+routing
+   ↓
+preparing
+   ↓
+running
+   ↓
+fallback   (when configured/needed)
+   ↓
+success | error | timeout | unavailable | cancelled
+```
+
+An interactive `cortex-relay launch` also creates a host-session record and propagates that session identity into the injected MCP process. This allows worker records to preserve the full host-to-worker route.
+
+Use a second terminal for a live dashboard:
+
+```bash
+cortex-relay status --watch
+```
+
+One-shot and machine-readable forms:
+
+```bash
+cortex-relay status
+cortex-relay status --active-only
+cortex-relay status --json
+cortex-relay history
+cortex-relay history --json
+```
+
+The state captures:
+- host session/profile/model/reasoning when launched through CortexRelay;
+- worker task ID, role, profile, provider, model, reasoning and billing class;
+- fallback attempts;
+- worktree path/branch;
+- elapsed/provider-reported duration;
+- normalized input/output/total token counts when available;
+- provider-reported cost when available;
+- tests, changed files, risks, result summary and errors;
+- provider conversation/session identifiers.
+
+State is deliberately kept outside the project checkout:
+- Windows: `%LOCALAPPDATA%\CortexRelay\state`;
+- `XDG_STATE_HOME` systems: `$XDG_STATE_HOME/cortex-relay`;
+- fallback: `~/.local/state/cortex-relay`.
+
+Override with `CORTEX_RELAY_STATE_DIR`.
+
+Observability persistence is best-effort and cannot make execution fail. Completed task history can be removed with:
+
+```bash
+cortex-relay history --clear
+# or keep active tasks and clear completed records:
+cortex-relay status --clear-completed
+```
+
+The same data is exposed to MCP-capable orchestrators through the `status` and `history` tools.
 
 ## Inspect providers
 
@@ -324,6 +386,8 @@ The MCP surface is deliberately small:
 
 - `providers`
 - `profiles`
+- `status`
+- `history`
 - `delegate`
 - `delegate_parallel`
 
@@ -371,7 +435,7 @@ A2A cancellation propagates through a shared cancellation event to the provider 
 
 ### Network safety
 
-The A2A server is unauthenticated in version 0.7. CortexRelay therefore refuses to bind A2A to a non-loopback interface unless `--a2a-allow-remote` is explicitly supplied. Keep the default loopback binding for local Gemini CLI integration.
+The A2A server is unauthenticated in version 0.8. CortexRelay therefore refuses to bind A2A to a non-loopback interface unless `--a2a-allow-remote` is explicitly supplied. Keep the default loopback binding for local Gemini CLI integration.
 
 ## Provider development
 

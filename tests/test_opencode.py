@@ -232,6 +232,8 @@ opencode/gpt-6-luna
                 reasoning="xhigh",
                 workspace=Path(tmp),
                 access="read_only",
+                profile="muse",
+                metadata={"session_id": "session-test"},
             )
             command = adapter.host_command(task)
             env = adapter.host_environment(task)
@@ -246,6 +248,10 @@ opencode/gpt-6-luna
         self.assertEqual(config["permission"]["task"], "deny")
         self.assertEqual(config["permission"]["edit"], "deny")
         self.assertEqual(env["OPENCODE_CLIENT"], "cortex-relay-orchestrator")
+        self.assertEqual(env["CORTEX_RELAY_SESSION_ID"], "session-test")
+        self.assertEqual(env["CORTEX_RELAY_HOST_PROFILE"], "muse")
+        self.assertEqual(env["CORTEX_RELAY_HOST_MODEL"], "opencode/muse")
+        self.assertEqual(env["CORTEX_RELAY_HOST_REASONING"], "xhigh")
 
     @patch("cortex_relay.providers.opencode.shutil.which", return_value=None)
     def test_missing_binary_returns_unavailable(self, _which):

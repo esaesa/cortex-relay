@@ -137,9 +137,17 @@ Fallbacks are profile-to-profile edges. The default transition condition is prov
 
 Read-only tasks are instructed not to modify files, and all current runtime adapters compare git status before and after execution. Write-capable tasks can be isolated into linked git worktrees by the provider registry, so parallel writers do not share the same checkout.
 
+### Observability boundary
+
+Observability is implemented above provider adapters in the registry so every transport and provider shares one lifecycle model. Providers remain responsible only for their native execution/usage envelopes; the registry adds route/worktree/fallback context and persists the normalized task/session record.
+
+State is external to the Git checkout and keyed by the resolved workspace path. This avoids dirtying repositories and allows a separate terminal/process to monitor an active MCP worker tree. Writes are atomic and best-effort: observability is diagnostically useful but never execution-critical.
+
+Interactive host launches propagate only non-secret session identity fields (session ID, host profile/model/reasoning and workspace) to the injected MCP process. Provider credentials are not copied into observability records.
+
 ### Protocol frontends
 
-MCP and A2A are peer frontends over the same runtime. MCP exposes provider/profile discovery plus single/parallel delegation. A2A exposes a server-side fixed delegation policy through an Agent Card, JSON-RPC, and HTTP+JSON so remote agents such as Gemini CLI can send bounded text tasks without controlling local filesystem or permission policy.
+MCP and A2A are peer frontends over the same runtime. MCP exposes provider/profile discovery, runtime status/history, and single/parallel delegation. A2A exposes a server-side fixed delegation policy through an Agent Card, JSON-RPC, and HTTP+JSON so remote agents such as Gemini CLI can send bounded text tasks without controlling local filesystem or permission policy.
 
 ## Configuration ownership
 
@@ -160,5 +168,5 @@ The configuration writers remain idempotent and back up managed files. The runti
 - **Least privilege:** read-only contracts are checked for workspace changes, write-capable tasks can use isolated git worktrees, and A2A callers cannot alter the server-fixed workspace/access policy.
 - **Preservation:** unrelated Codex configuration should survive installation.
 - **Idempotence:** repeated initialization should update the managed policy instead of duplicating it.
-- **Traceability:** generated files can be reviewed and committed like any other project configuration.
+- **Traceability:** generated files can be reviewed and committed like any other project configuration; runtime task/session state is inspectable without modifying the repository.
 - **Progressive adoption:** teams can start with one repository before introducing user-level defaults.

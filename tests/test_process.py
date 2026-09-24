@@ -1,6 +1,9 @@
+import os
 import sys
+import tempfile
 import threading
 import unittest
+
 from pathlib import Path
 
 from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner
@@ -34,6 +37,29 @@ class ProcessRunnerTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "ok")
+
+    @unittest.skipUnless(os.name == "nt", "Windows npm shim regression")
+    def test_windows_cmd_shim_uses_sibling_powershell_without_shell_interpolation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cmd = root / "fake-provider.cmd"
+            ps1 = root / "fake-provider.ps1"
+
+            cmd.write_text("@echo off\r\necho should-not-run\r\n", encoding="utf-8")
+            ps1.write_text(
+                'Write-Output ("ok:" + $args[0])\nexit 0\n',
+                encoding="utf-8",
+            )
+
+            result = ProcessRunner().run(
+                [str(cmd), "hello & goodbye"],
+                cwd=root,
+                timeout_seconds=10,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "ok:hello & goodbye")
+        self.assertEqual(result.argv, (str(cmd), "hello & goodbye"))
 
 
 if __name__ == "__main__":
