@@ -1264,6 +1264,8 @@ def _status_symbol(status: str) -> str:
         "queued": "○",
         "blocked": "⊘",
         "interrupted": "!",
+        "failed_gate": "⊗",
+        "budget_exceeded": "$",
     }.get(status, "?")
 
 
