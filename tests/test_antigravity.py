@@ -76,6 +76,30 @@ class AntigravityTests(unittest.TestCase):
         self.assertEqual(result.conversation_id, "abc")
         self.assertEqual(result.evidence[0].path, "auth.py")
 
+    @patch("cortex_relay.providers.antigravity.shutil.which", return_value="/usr/bin/agy")
+    def test_print_timeout_is_reported_as_timeout(self, _which):
+        runner = FakeRunner(
+            ProcessResult(
+                argv=("agy",),
+                returncode=0,
+                stdout=json.dumps({"status": "SUCCESS", "response": ""}),
+                stderr="[agy] print timeout after 1m0s with turn in progress; returning partial output",
+            )
+        )
+        adapter = AntigravityAdapter(runner=runner)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = adapter.execute(
+                TaskSpec(
+                    objective="List files",
+                    workspace=Path(tmp),
+                    access="read_only",
+                )
+            )
+
+        self.assertEqual(result.status, "timeout")
+        self.assertIn("print timeout", result.error)
+
     @patch("cortex_relay.providers.antigravity.shutil.which", return_value=None)
     def test_missing_binary_returns_unavailable(self, _which):
         adapter = AntigravityAdapter()

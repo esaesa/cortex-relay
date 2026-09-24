@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 from pathlib import Path
@@ -75,15 +76,11 @@ class OpenCodeAdapter(ProviderAdapter):
         if not task.model:
             raise ValueError("OpenCode orchestrator profile requires a model")
 
-        selector = task.model
-        if task.reasoning and task.reasoning != "default":
-            selector = f"{selector}#{task.reasoning}"
-
         argv = [
             self.binary,
             str(task.workspace),
             "--model",
-            selector,
+            task.model,
         ]
         options = _profile_options(task)
         agent = options.get("agent")
@@ -167,13 +164,19 @@ class OpenCodeAdapter(ProviderAdapter):
         if variant_error:
             raise RuntimeError(variant_error)
 
-        completed = subprocess.run(
-            prepare_process_argv(self.host_command(task)),
-            cwd=task.workspace,
-            env=self.host_environment(task),
-            check=False,
-        )
-        return completed.returncode
+        # The TUI reads its variant from model.json; --model accepts only provider/model.
+        # Isolate that state so concurrent hosts can choose different variants.
+        with tempfile.TemporaryDirectory(prefix="cortex-relay-opencode-") as state_home:
+            env = self.host_environment(task)
+            env["XDG_STATE_HOME"] = state_home
+            _write_host_model_state(Path(state_home), task)
+            completed = subprocess.run(
+                prepare_process_argv(self.host_command(task)),
+                cwd=task.workspace,
+                env=env,
+                check=False,
+            )
+            return completed.returncode
 
     def execute(self, task: TaskSpec) -> TaskResult:
         capabilities = self.capabilities()
@@ -628,6 +631,35 @@ def _parse_json_object(value: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _write_host_model_state(state_home: Path, task: TaskSpec) -> None:
+    """Give this host launch its own model/variant selection state."""
+
+    source_root = os.environ.get("XDG_STATE_HOME") or str(
+        Path.home() / ".local" / "state"
+    )
+    source_path = Path(source_root) / "opencode" / "model.json"
+    try:
+        loaded = json.loads(source_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        loaded = {}
+
+    model_state = dict(loaded) if isinstance(loaded, dict) else {}
+    variants = model_state.get("variant")
+    variant_state = dict(variants) if isinstance(variants, dict) else {}
+    if task.reasoning == "default":
+        variant_state.pop(task.model, None)
+    else:
+        variant_state[task.model] = task.reasoning
+    model_state["variant"] = variant_state
+
+    destination = state_home / "opencode" / "model.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(model_state, separators=(",", ":")),
+        encoding="utf-8",
+    )
 
 
 def _variant_names(metadata: dict[str, Any]) -> set[str]:

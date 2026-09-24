@@ -240,7 +240,9 @@ opencode/gpt-6-luna
 
         self.assertEqual(command[0], "opencode")
         self.assertIn("--model", command)
-        self.assertIn("opencode/muse#xhigh", command)
+        self.assertIn("opencode/muse", command)
+        model_index = command.index("--model") + 1
+        self.assertNotIn("#", command[model_index])
         config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
         server = config["mcp"]["servers"]["cortex-relay"]
         self.assertEqual(server["type"], "local")

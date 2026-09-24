@@ -1,0 +1,39 @@
+active_preset = "default"
+
+[profiles]
+
+[profiles.orchestrator]
+provider = "opencode"
+reasoning = "xhigh"
+access = "read_only"
+isolate_write = true
+model = "opencode/muse-spark-1.3-contributor-free"
+
+[profiles.orchestrator.options]
+validate_variant = true
+
+[profiles.worker]
+provider = "antigravity"
+reasoning = "high"
+access = "workspace_write"
+isolate_write = true
+
+[roles]
+orchestrator = "orchestrator"
+explorer = "worker"
+architect = "orchestrator"
+implementer = "worker"
+tester = "worker"
+reviewer = "worker"
+
+[presets]
+
+[presets.default]
+
+[presets.default.roles]
+orchestrator = "orchestrator"
+explorer = "worker"
+architect = "orchestrator"
+implementer = "worker"
+tester = "worker"
+reviewer = "worker"

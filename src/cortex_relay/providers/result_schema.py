@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 
+# Structured-output strict mode (Codex/OpenAI) requires every property key to
+# appear in "required" and optional fields to be explicitly nullable.
 RESULT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -13,11 +15,11 @@ RESULT_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "finding": {"type": "string"},
-                    "path": {"type": "string"},
-                    "symbol": {"type": "string"},
-                    "severity": {"type": "string"},
+                    "path": {"type": ["string", "null"]},
+                    "symbol": {"type": ["string", "null"]},
+                    "severity": {"type": ["string", "null"]},
                 },
-                "required": ["finding"],
+                "required": ["finding", "path", "symbol", "severity"],
                 "additionalProperties": False,
             },
         },

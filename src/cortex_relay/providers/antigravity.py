@@ -156,6 +156,16 @@ class AntigravityAdapter(ProviderAdapter):
                 error=f"timeout after {task.timeout_seconds} seconds",
             )
 
+        stderr_text = result.stderr.strip()
+        if "print timeout" in stderr_text.lower():
+            return TaskResult(
+                status="timeout",
+                provider=self.name,
+                model=task.model,
+                summary="Antigravity task timed out before producing a final result.",
+                error=stderr_text or f"timeout after {task.timeout_seconds} seconds",
+            )
+
         envelope = self._parse_envelope(result.stdout)
         status = str(envelope.get("status", "")).upper()
         if result.returncode != 0 or status != "SUCCESS":

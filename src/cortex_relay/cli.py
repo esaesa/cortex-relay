@@ -368,7 +368,7 @@ def _status(args: argparse.Namespace, *, completed_only: bool = False) -> int:
         return 0
 
     if not getattr(args, "watch", False):
-        print(
+        _print_dashboard(
             render_dashboard(
                 snapshot(),
                 title="CortexRelay history" if completed_only else "CortexRelay status",
@@ -382,11 +382,20 @@ def _status(args: argparse.Namespace, *, completed_only: bool = False) -> int:
             view = render_dashboard(snapshot(), title="CortexRelay live status")
             if sys.stdout.isatty():
                 print("\033[2J\033[H", end="")
-            print(view)
+            _print_dashboard(view)
             print("\nWatching for changes. Ctrl+C to exit.")
             time.sleep(interval)
     except KeyboardInterrupt:
         return 0
+
+
+def _print_dashboard(text: str) -> None:
+    """Print dashboard symbols safely on limited Windows code pages."""
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        print(text.encode(encoding, errors="replace").decode(encoding, errors="replace"))
 
 
 def _models(args: argparse.Namespace) -> int:
