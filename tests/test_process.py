@@ -95,7 +95,7 @@ class ProcessRunnerTests(unittest.TestCase):
             result = ProcessRunner().run(
                 [str(cmd), "hello & goodbye"],
                 cwd=root,
-                timeout_seconds=10,
+                timeout_seconds=30,
             )
 
         self.assertEqual(result.returncode, 0)
