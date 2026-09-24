@@ -23,7 +23,8 @@ def create_server(registry: ProviderRegistry | None = None) -> Any:
         "CortexRelay",
         instructions=(
             "Delegate bounded coding-agent work to registered external providers. "
-            "The calling agent remains responsible for planning and final synthesis."
+            "The calling agent remains responsible for planning and final synthesis. "
+            "Use status/history to inspect active and completed CortexRelay work."
         ),
     )
 
@@ -36,6 +37,31 @@ def create_server(registry: ProviderRegistry | None = None) -> Any:
     def profiles(workspace: str = ".", preset: str | None = None) -> dict[str, Any]:
         """Show merged execution profiles and effective role assignments."""
         return runtime.profile_config(Path(workspace), preset=preset)
+
+    @server.tool()
+    def status(
+        workspace: str = ".",
+        limit: int = 12,
+        active_only: bool = False,
+    ) -> dict[str, Any]:
+        """Show active/recent CortexRelay delegation state for a workspace."""
+        return runtime.status_snapshot(
+            Path(workspace),
+            limit=max(1, limit),
+            active_only=active_only,
+        )
+
+    @server.tool()
+    def history(
+        workspace: str = ".",
+        limit: int = 30,
+    ) -> dict[str, Any]:
+        """Show completed CortexRelay delegation history for a workspace."""
+        return runtime.status_snapshot(
+            Path(workspace),
+            limit=max(1, limit),
+            completed_only=True,
+        )
 
     @server.tool()
     def delegate(
