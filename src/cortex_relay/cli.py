@@ -1,30 +1,36 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 from . import __version__
 from .configurator import ConfigValues
+from .core.models import TaskSpec
+from .core.registry import default_registry
+from .diagnostics import configuration_checks, runtime_checks
 from .gemini import GEMINI_THINKING_LEVELS, GeminiConfigValues
-from .installer import expected_paths, install
+from .installer import install
 
 
 CODEX_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
-PROVIDERS = ("codex", "gemini")
+CONFIG_PROVIDERS = ("codex", "gemini")
+RUNTIME_ACCESS = ("read_only", "workspace_write")
+RUNTIME_REASONING = ("low", "medium", "high")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="cortex-relay",
-        description="Configure cost-aware multi-agent orchestration for Codex or Gemini CLI.",
+        description="Configure and run provider-neutral coding-agent delegation.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init", help="Install or update CortexRelay configuration.")
-    init_parser.add_argument("--provider", choices=PROVIDERS, default="codex")
+    init_parser.add_argument("--provider", choices=CONFIG_PROVIDERS, default="codex")
     init_parser.add_argument("--scope", choices=("project", "user"), default="project")
     init_parser.add_argument("--project-dir", type=Path, default=Path.cwd())
     init_parser.add_argument("--preset", choices=("astra-luna", "gemini-3.8-flash"))
@@ -44,26 +50,149 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--reviewer-thinking", choices=GEMINI_THINKING_LEVELS)
     init_parser.add_argument("--dry-run", action="store_true")
 
-    doctor_parser = subparsers.add_parser("doctor", help="Check whether expected CortexRelay files exist.")
-    doctor_parser.add_argument("--provider", choices=PROVIDERS, default="codex")
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Check generated configuration and runtime provider availability.",
+    )
+    doctor_parser.add_argument("--provider", choices=CONFIG_PROVIDERS, default="codex")
     doctor_parser.add_argument("--scope", choices=("project", "user"), default="project")
     doctor_parser.add_argument("--project-dir", type=Path, default=Path.cwd())
+    doctor_parser.add_argument(
+        "--runtime-only",
+        action="store_true",
+        help="Skip generated configuration checks and require a runtime provider.",
+    )
+
+    subparsers.add_parser("providers", help="List runtime providers and capabilities.")
+
+    delegate_parser = subparsers.add_parser(
+        "delegate",
+        help="Delegate one bounded task through the provider-neutral runtime.",
+    )
+    delegate_parser.add_argument("objective")
+    delegate_parser.add_argument("--role", default="reviewer")
+    delegate_parser.add_argument("--provider", default="auto")
+    delegate_parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    delegate_parser.add_argument("--access", choices=RUNTIME_ACCESS, default="read_only")
+    delegate_parser.add_argument("--reasoning", choices=RUNTIME_REASONING, default="high")
+    delegate_parser.add_argument("--model")
+    delegate_parser.add_argument("--accept", action="append", default=[], dest="acceptance_criteria")
+    delegate_parser.add_argument("--timeout", type=int, default=300, dest="timeout_seconds")
+    delegate_parser.add_argument(
+        "--isolate-write",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use a temporary git worktree for workspace-write tasks (default: enabled).",
+    )
+    delegate_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    serve_parser = subparsers.add_parser("serve", help="Expose CortexRelay to another coding agent.")
+    serve_parser.add_argument("--transport", choices=("mcp",), default="mcp")
+    serve_parser.add_argument(
+        "--mcp-transport",
+        choices=("stdio", "streamable-http"),
+        default="stdio",
+    )
+    serve_parser.add_argument("--host", default="127.0.0.1")
+    serve_parser.add_argument("--port", type=int, default=8765)
 
     return parser
 
 
-def _doctor(provider: str, scope: str, project_dir: Path) -> int:
-    expected = expected_paths(provider=provider, scope=scope, project_dir=project_dir)
-    missing = [path for path in expected if not path.exists()]
-    if missing:
-        print(f"CortexRelay {provider} configuration is incomplete:")
-        for path in missing:
-            print(f"  MISSING {path}")
+def _doctor(provider: str, scope: str, project_dir: Path, *, runtime_only: bool) -> int:
+    config = []
+    if not runtime_only:
+        config = configuration_checks(provider=provider, scope=scope, project_dir=project_dir)
+    runtime = runtime_checks(default_registry())
+
+    print("CortexRelay diagnostics:")
+    for check in [*config, *runtime]:
+        marker = "OK" if check.ok else ("MISSING" if check.name.startswith("config:") else "OPTIONAL")
+        print(f"  {marker:<8} {check.name}: {check.detail}")
+
+    if runtime_only:
+        return 0 if runtime and any(check.ok for check in runtime) else 1
+    return 0 if all(check.ok for check in config) else 1
+
+
+def _providers() -> int:
+    capabilities = default_registry().capabilities()
+    if not capabilities:
+        print("No runtime providers are registered.")
         return 1
 
-    print(f"CortexRelay {provider} configuration looks complete:")
-    for path in expected:
-        print(f"  OK      {path}")
+    print("CortexRelay runtime providers:")
+    for item in capabilities:
+        status = "available" if item["available"] else "unavailable"
+        print(f"  {item['name']}: {status}")
+        print(f"    binary: {item['binary']}")
+        print(f"    detail: {item['detail']}")
+        print(
+            "    features: structured_output={structured_output}, model_selection={model_selection}, "
+            "reasoning_control={reasoning_control}, workspace_write={workspace_write}".format(**item)
+        )
+    return 0
+
+
+def _delegate(args: argparse.Namespace) -> int:
+    task = TaskSpec(
+        objective=args.objective,
+        role=args.role,
+        provider=args.provider,
+        workspace=args.workspace,
+        access=args.access,
+        reasoning=args.reasoning,
+        model=args.model,
+        acceptance_criteria=tuple(args.acceptance_criteria),
+        timeout_seconds=args.timeout_seconds,
+        isolate_write=args.access == "workspace_write" and args.isolate_write,
+    )
+    result = default_registry().execute(task)
+    if args.as_json:
+        print(json.dumps(result.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(f"CortexRelay delegation: {result.status}")
+        print(f"  provider: {result.provider}")
+        if result.model:
+            print(f"  model:    {result.model}")
+        print(f"  summary:  {result.summary}")
+        if result.error:
+            print(f"  error:    {result.error}")
+        if result.evidence:
+            print("  evidence:")
+            for item in result.evidence:
+                location = ":".join(part for part in (item.path, item.symbol) if part)
+                suffix = f" ({location})" if location else ""
+                print(f"    - {item.finding}{suffix}")
+        if result.tests:
+            print("  tests:")
+            for item in result.tests:
+                print(f"    - {item}")
+        if result.risks:
+            print("  risks:")
+            for item in result.risks:
+                print(f"    - {item}")
+        if result.metadata.get("worktree_path"):
+            print(f"  worktree: {result.metadata['worktree_path']}")
+            print(f"  branch:   {result.metadata['worktree_branch']}")
+    return 0 if result.ok else 1
+
+
+def _serve(args: argparse.Namespace) -> int:
+    if args.transport != "mcp":
+        raise ValueError(f"unsupported transport: {args.transport}")
+
+    from .transports.mcp import run_mcp
+
+    try:
+        run_mcp(
+            transport=args.mcp_transport,
+            host=args.host,
+            port=args.port,
+        )
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     return 0
 
 
@@ -118,13 +247,7 @@ def _gemini_values(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
     return "gemini-3.8-flash", values
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    if args.command == "doctor":
-        return _doctor(args.provider, args.scope, args.project_dir)
-
+def _init(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if args.provider == "codex":
         preset, values = _codex_values(args, parser)
     else:
@@ -158,6 +281,26 @@ def main(argv: list[str] | None = None) -> int:
         for path in result.backups:
             print(f"    {path}")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.command == "doctor":
+        return _doctor(
+            args.provider,
+            args.scope,
+            args.project_dir,
+            runtime_only=args.runtime_only,
+        )
+    if args.command == "providers":
+        return _providers()
+    if args.command == "delegate":
+        return _delegate(args)
+    if args.command == "serve":
+        return _serve(args)
+    return _init(args, parser)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 # CortexRelay
 
-**Cost-aware multi-agent orchestration and reasoning-budget routing for Codex and Gemini CLI.**
+**Provider-neutral coding-agent delegation plus cost-aware orchestration configuration for Codex and Gemini CLI.**
 
-CortexRelay is an open-source configuration toolkit for developers who want to spend the strongest reasoning where mistakes have the highest downstream cost, while routing high-volume bounded work to efficient subagents.
+CortexRelay is an open-source delegation runtime and configuration toolkit. It lets a primary coding agent keep ownership of planning and final synthesis while delegating bounded work through a common task/result contract to external providers such as Antigravity CLI.
 
 It supports two provider backends today:
 
@@ -69,6 +69,67 @@ Verify:
 ```bash
 cortex-relay --version
 ```
+
+## Runtime delegation
+
+Version 0.3 adds a provider-neutral runtime beside the existing configuration writers.
+
+```text
+Primary coding agent
+        |
+        | bounded task
+        v
+   CortexRelay
+        |
+        +--> routing policy
+        +--> workspace isolation
+        +--> provider adapter
+                  |
+                  v
+            Antigravity CLI
+                  |
+                  v
+        normalized result
+```
+
+The calling agent remains the orchestrator. CortexRelay handles deterministic routing, execution, isolation, normalization, and protocol exposure rather than adding another planning model.
+
+Inspect runtime providers:
+
+```bash
+cortex-relay providers
+cortex-relay doctor --runtime-only
+```
+
+Delegate a read-only review:
+
+```bash
+cortex-relay delegate \\
+  --provider antigravity \\
+  --role reviewer \\
+  --reasoning high \\
+  "Review the authentication implementation for regressions"
+```
+
+Write-capable tasks use an isolated git worktree by default:
+
+```bash
+cortex-relay delegate \\
+  --access workspace_write \\
+  --role implementer \\
+  "Implement the bounded change"
+```
+
+Install the optional MCP transport and expose CortexRelay to another coding agent:
+
+```bash
+python -m pip install -e ".[mcp]"
+cortex-relay serve --transport mcp
+```
+
+The MCP surface is intentionally small: `providers`, `delegate`, and `delegate_parallel`.
+
+See [Runtime delegation](docs/runtime.md) and [Architecture](docs/architecture.md).
 
 ## Quick start: Codex
 
@@ -219,11 +280,11 @@ Worker reports should contain the smallest evidence needed for the primary agent
 
 ## Safety and limitations
 
-- CortexRelay changes local Codex or Gemini CLI configuration; it does not proxy API calls or intercept model traffic.
+- CortexRelay can both generate Codex/Gemini configuration and invoke registered provider CLIs for delegated tasks. It does not proxy or intercept provider API traffic.
 - Model availability depends on your account, workspace policy, authentication method, product surface, and rollout status.
 - Model names, pricing, thinking levels, and subagent schemas can change. Review upstream documentation before organization-wide rollout.
 - Lower reasoning is appropriate for bounded/mechanical tasks, not automatically for every worker.
-- Do not grant a subagent broader tool access than its task requires.
+- Do not grant a delegated provider broader tool access than its task requires. CortexRelay does not pass Antigravity's global auto-approval flag.
 - Gemini project settings are ignored in untrusted workspaces; trust the workspace before expecting `.gemini/settings.json` to load.
 
 ## Official references

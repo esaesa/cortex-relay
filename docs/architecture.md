@@ -102,21 +102,41 @@ Recommended sequence:
 
 This keeps expensive reasoning concentrated at the points where uncertainty is highest.
 
+## Runtime boundary
+
+CortexRelay now has two deliberately separate layers:
+
+1. **Configuration bootstrap** writes standard Codex or Gemini CLI configuration, role files, and orchestration instructions.
+2. **Delegation runtime** accepts a bounded provider-neutral task, applies deterministic policy, executes a provider adapter, and returns a normalized result.
+
+The primary coding agent remains responsible for decomposition, sequencing, arbitration, and final synthesis. CortexRelay does not add a second LLM planning loop.
+
+The runtime is built around a provider-neutral `TaskSpec -> TaskResult` contract. Provider-specific CLI flags, response envelopes, authentication behavior, and error translation stay inside provider adapters. The first external runtime adapter targets Antigravity CLI.
+
+### Workspace isolation
+
+Read-only tasks are instructed not to modify files, and the Antigravity adapter compares git status before and after execution. Write-capable tasks can be isolated into linked git worktrees by the provider registry, so parallel writers do not share the same checkout.
+
+### Protocol frontends
+
+MCP is the first runtime frontend and exposes provider discovery, single delegation, and parallel delegation. Gemini CLI remote subagents use A2A; CortexRelay includes an A2A configuration helper, while a production A2A HTTP server remains a later milestone.
+
 ## Configuration ownership
 
-CortexRelay uses standard Codex configuration:
+CortexRelay still uses standard host configuration:
 
-- `.codex/config.toml` or `~/.codex/config.toml` for primary and global subagent defaults;
-- `.codex/agents/*.toml` or `~/.codex/agents/*.toml` for custom roles;
-- repository or global `AGENTS.md` for orchestration behavior.
+- `.codex/config.toml` or `~/.codex/config.toml` for Codex primary and global subagent defaults;
+- `.codex/agents/*.toml` or `~/.codex/agents/*.toml` for Codex custom roles;
+- repository or global `AGENTS.md` for Codex orchestration behavior;
+- `.gemini/settings.json`, `.gemini/agents/*.md`, and `GEMINI.md` for Gemini CLI.
 
-The CLI is only an idempotent configuration writer with backups. It is not a runtime proxy.
+The configuration writers remain idempotent and back up managed files. The runtime is additive and does not replace host-native configuration.
 
 ## Design principles
 
-- **Model-agnostic:** model IDs are data, not architectural dependencies.
+- **Provider-neutral core:** model IDs and provider-specific CLI details are data or adapters, not core architectural dependencies.
 - **Explicit roles:** workers have narrow responsibilities and sandbox modes.
-- **Least privilege:** read-only roles remain read-only.
+- **Least privilege:** read-only contracts are checked for workspace changes, and write-capable tasks can use isolated git worktrees.
 - **Preservation:** unrelated Codex configuration should survive installation.
 - **Idempotence:** repeated initialization should update the managed policy instead of duplicating it.
 - **Traceability:** generated files can be reviewed and committed like any other project configuration.
