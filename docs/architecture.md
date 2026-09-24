@@ -111,15 +111,35 @@ CortexRelay now has two deliberately separate layers:
 
 The primary coding agent remains responsible for decomposition, sequencing, arbitration, and final synthesis. CortexRelay does not add a second LLM planning loop.
 
-The runtime is built around a provider-neutral `TaskSpec -> TaskResult` contract. Provider-specific CLI flags, response envelopes, authentication behavior, and error translation stay inside provider adapters. The current runtime adapters target Antigravity CLI and OpenAI Codex CLI.
+The runtime is built around a provider-neutral `TaskSpec -> TaskResult` contract. Provider-specific CLI flags, response envelopes, authentication behavior, and error translation stay inside provider adapters. The current runtime adapters target OpenCode, Antigravity CLI, and OpenAI Codex CLI.
+
+### Execution profiles
+
+Runtime routing is separated into two layers:
+
+```text
+semantic role
+    ↓
+named execution profile
+    ↓
+provider adapter + model + reasoning + billing path
+```
+
+A role such as `implementer` or `reviewer` never has to encode a provider. It points to a named profile. The same underlying model can therefore exist as separate resources such as `luna-via-zen` and `luna-via-codex`.
+
+Profile resolution is deterministic: an explicit task profile has highest priority, followed by preset/base role mappings, followed by the legacy provider routing policy. This preserves compatibility while allowing users to change the orchestration topology entirely through configuration.
+
+User-level profile configuration is a base layer and project configuration overrides it. Presets only overlay role assignments; they do not mutate the profile definitions themselves.
+
+Fallbacks are profile-to-profile edges. The default transition condition is provider unavailability, not arbitrary execution failure, so CortexRelay does not silently replace a failed implementation with a different writer unless the user explicitly opts into that policy.
 
 ### Workspace isolation
 
-Read-only tasks are instructed not to modify files, and both runtime adapters compare git status before and after execution. Write-capable tasks can be isolated into linked git worktrees by the provider registry, so parallel writers do not share the same checkout.
+Read-only tasks are instructed not to modify files, and all current runtime adapters compare git status before and after execution. Write-capable tasks can be isolated into linked git worktrees by the provider registry, so parallel writers do not share the same checkout.
 
 ### Protocol frontends
 
-MCP and A2A are peer frontends over the same runtime. MCP exposes provider discovery plus single/parallel delegation. A2A exposes a server-side fixed delegation policy through an Agent Card, JSON-RPC, and HTTP+JSON so remote agents such as Gemini CLI can send bounded text tasks without controlling local filesystem or permission policy.
+MCP and A2A are peer frontends over the same runtime. MCP exposes provider/profile discovery plus single/parallel delegation. A2A exposes a server-side fixed delegation policy through an Agent Card, JSON-RPC, and HTTP+JSON so remote agents such as Gemini CLI can send bounded text tasks without controlling local filesystem or permission policy.
 
 ## Configuration ownership
 
@@ -128,13 +148,13 @@ CortexRelay still uses standard host configuration:
 - `.codex/config.toml` or `~/.codex/config.toml` for Codex primary and global subagent defaults;
 - `.codex/agents/*.toml` or `~/.codex/agents/*.toml` for Codex custom roles;
 - repository or global `AGENTS.md` for Codex orchestration behavior;
-- `.gemini/settings.json`, `.gemini/agents/*.md`, and `GEMINI.md` for Gemini CLI.
+- `.gemini/settings.json`, `.gemini/agents/*.md`, and `GEMINI.md` for Gemini CLI;\n- `~/.cortex-relay/config.toml` and project `.cortex-relay/config.toml` for provider-neutral execution profiles, role mappings, presets, and fallback policy.
 
 The configuration writers remain idempotent and back up managed files. The runtime is additive and does not replace host-native configuration.
 
 ## Design principles
 
-- **Provider-neutral core:** model IDs and provider-specific CLI details are data or adapters, not core architectural dependencies.
+- **Provider-neutral core:** roles point to execution profiles; model IDs, billing paths, and provider-specific CLI details are data or adapters, not core architectural dependencies.
 - **Explicit roles:** workers have narrow responsibilities and sandbox modes.
 - **Least privilege:** read-only contracts are checked for workspace changes, write-capable tasks can use isolated git worktrees, and A2A callers cannot alter the server-fixed workspace/access policy.
 - **Preservation:** unrelated Codex configuration should survive installation.
