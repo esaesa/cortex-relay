@@ -48,6 +48,7 @@ class OpenCodeAdapter(ProviderAdapter):
     def command_for(self, task: TaskSpec) -> list[str]:
         argv = [
             self.binary,
+            "--pure",
             "run",
             "--format",
             "json",
@@ -284,7 +285,8 @@ class OpenCodeAdapter(ProviderAdapter):
         )
         schema = json.dumps(RESULT_SCHEMA, separators=(",", ":"))
         return (
-            "You are a delegated CortexRelay worker.\n\n"
+            "You are a delegated CortexRelay worker. Do not delegate to subagents, MCP tools, "
+            "or other external agents.\n\n"
             f"Role: {task.role}\n"
             f"Objective: {task.objective.strip()}\n"
             f"Access: {task.access}\n"
