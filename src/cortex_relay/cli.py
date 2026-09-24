@@ -120,7 +120,11 @@ def build_parser() -> argparse.ArgumentParser:
         "models",
         help="Discover models exposed by a runtime provider.",
     )
-    models_parser.add_argument("--provider", choices=("opencode",), default="opencode")
+    models_parser.add_argument(
+        "--provider",
+        choices=("opencode", "antigravity"),
+        default="opencode",
+    )
     models_parser.add_argument("--refresh", action="store_true")
     models_parser.add_argument("--verbose", action="store_true")
     models_parser.add_argument("--json", action="store_true", dest="as_json")
@@ -386,31 +390,43 @@ def _status(args: argparse.Namespace, *, completed_only: bool = False) -> int:
 
 
 def _models(args: argparse.Namespace) -> int:
-    if args.provider != "opencode":
-        print(f"unsupported model discovery provider: {args.provider}", file=sys.stderr)
-        return 2
+    if args.provider == "opencode":
+        from .providers.opencode import OpenCodeAdapter
 
-    from .providers.opencode import OpenCodeAdapter
+        adapter = OpenCodeAdapter()
+        if not adapter.capabilities().available:
+            print(adapter.capabilities().detail, file=sys.stderr)
+            return 1
 
-    adapter = OpenCodeAdapter()
-    if not adapter.capabilities().available:
-        print(adapter.capabilities().detail, file=sys.stderr)
-        return 1
+        models = adapter.discover_models(
+            refresh=args.refresh,
+            verbose=args.verbose or args.as_json,
+        )
+        title = "OpenCode"
+    else:
+        from .providers.antigravity import AntigravityAdapter
 
-    models = adapter.discover_models(
-        refresh=args.refresh,
-        verbose=args.verbose or args.as_json,
-    )
+        adapter = AntigravityAdapter()
+        if not adapter.capabilities().available:
+            print(adapter.capabilities().detail, file=sys.stderr)
+            return 1
+
+        models = adapter.discover_models()
+        title = "Antigravity"
+
     if not models:
-        print("No OpenCode models were discovered.", file=sys.stderr)
+        print(f"No {title} models were discovered.", file=sys.stderr)
         return 1
 
     if args.as_json:
         print(json.dumps(models, indent=2, ensure_ascii=False))
     else:
-        print("OpenCode models:")
+        print(f"{title} models:")
         for model_id in sorted(models):
-            print(f"  {model_id}")
+            metadata = models.get(model_id) or {}
+            label = metadata.get("label")
+            suffix = f" — {label}" if isinstance(label, str) and label != model_id else ""
+            print(f"  {model_id}{suffix}")
     return 0
 
 
