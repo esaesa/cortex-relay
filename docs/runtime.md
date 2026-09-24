@@ -1,6 +1,6 @@
 # Runtime delegation
 
-CortexRelay 0.6 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI through the same provider-neutral runtime, with direct CLI, MCP, and A2A frontends.
+CortexRelay 0.7 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI through the same provider-neutral runtime, with direct CLI, MCP, and A2A frontends.
 
 The primary coding agent remains the orchestrator. CortexRelay does not attempt to replace its planning loop. It receives an already-bounded task, applies deterministic routing policy, executes the selected provider, and returns a compact normalized result.
 
@@ -52,6 +52,22 @@ python -m pip install -e ".[runtime]"
 ```
 
 OpenCode is discovered through `opencode`, Antigravity through `agy`, and Codex through `codex` on `PATH`. Authenticate each CLI using its normal upstream flow before delegation.
+
+## Easy configuration workflow
+
+Most users should start with the interactive commands rather than writing `.cortex-relay/config.toml` manually:
+
+```bash
+cortex-relay setup
+cortex-relay config
+cortex-relay launch
+```
+
+`setup` detects live providers/models, creates orchestrator and worker profiles, assigns roles, optionally configures a fallback, validates the result, and saves it atomically with a `.bak` backup when overwriting an existing config.
+
+`config` edits the project or user config interactively. It supports role reassignment, profile editing/creation, and active-preset selection. If no config exists, it starts `setup`.
+
+`launch` already defaults to `--role orchestrator`, so normal day-to-day use does not need the role flag.
 
 ## Inspect providers
 
@@ -355,7 +371,7 @@ A2A cancellation propagates through a shared cancellation event to the provider 
 
 ### Network safety
 
-The A2A server is unauthenticated in version 0.6. CortexRelay therefore refuses to bind A2A to a non-loopback interface unless `--a2a-allow-remote` is explicitly supplied. Keep the default loopback binding for local Gemini CLI integration.
+The A2A server is unauthenticated in version 0.7. CortexRelay therefore refuses to bind A2A to a non-loopback interface unless `--a2a-allow-remote` is explicitly supplied. Keep the default loopback binding for local Gemini CLI integration.
 
 ## Provider development
 
