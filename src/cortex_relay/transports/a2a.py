@@ -69,6 +69,8 @@ except ImportError as exc:  # pragma: no cover - exercised by base-install tests
 class A2AServerPolicy:
     """Server-side delegation policy applied to every inbound A2A task."""
 
+    profile: str | None = None
+    preset: str | None = None
     provider: str = "auto"
     model: str | None = None
     reasoning: str = "high"
@@ -81,6 +83,20 @@ class A2AServerPolicy:
     def __post_init__(self) -> None:
         if not self.provider.strip():
             raise ValueError("provider must not be empty")
+        object.__setattr__(
+            self,
+            "profile",
+            self.profile.strip()
+            if isinstance(self.profile, str) and self.profile.strip()
+            else None,
+        )
+        object.__setattr__(
+            self,
+            "preset",
+            self.preset.strip()
+            if isinstance(self.preset, str) and self.preset.strip()
+            else None,
+        )
         if not self.role.strip():
             raise ValueError("role must not be empty")
         if self.access not in {"read_only", "workspace_write"}:
@@ -109,6 +125,8 @@ class A2AServerPolicy:
         return TaskSpec(
             objective=objective,
             role=self.role,
+            profile=self.profile,
+            preset=self.preset,
             provider=self.provider,
             workspace=self.workspace,
             access=self.access,
@@ -175,8 +193,9 @@ class CortexRelayA2AExecutor(AgentExecutor):  # type: ignore[misc]
                 parts=[
                     Part(
                         text=(
-                            f"Delegating through CortexRelay provider={self.policy.provider} "
-                            f"role={self.policy.role} access={self.policy.access}."
+                            f"Delegating through CortexRelay profile={self.policy.profile or 'auto'} "
+                            f"provider={self.policy.provider} role={self.policy.role} "
+                            f"access={self.policy.access}."
                         )
                     )
                 ]
@@ -275,11 +294,18 @@ def create_agent_card(
 ) -> Any:
     _require_a2a()
     base = _normalize_public_url(public_url)
-    provider_label = policy.provider if policy.provider != "auto" else "configured provider"
+    if policy.profile:
+        route_label = f"profile={policy.profile}"
+    elif policy.preset:
+        route_label = f"preset={policy.preset}, role={policy.role}"
+    else:
+        provider_label = (
+            policy.provider if policy.provider != "auto" else "configured provider"
+        )
+        route_label = f"provider={provider_label}, role={policy.role}"
     description = (
         "Provider-neutral coding-agent delegation through CortexRelay. "
-        f"Inbound text tasks are routed to {provider_label} with server-fixed "
-        f"role={policy.role} and access={policy.access}."
+        f"Inbound text tasks use server-fixed {route_label} and access={policy.access}."
     )
     input_modes = ["text/plain"]
     output_modes = ["application/json", "text/plain"]
@@ -368,6 +394,8 @@ def create_a2a_app(
         return {
             "status": "ok",
             "version": __version__,
+            "profile": policy.profile,
+            "preset": policy.preset,
             "provider": policy.provider,
             "access": policy.access,
         }
