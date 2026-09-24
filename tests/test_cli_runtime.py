@@ -37,6 +37,13 @@ class CLIRuntimeTests(unittest.TestCase):
         self.assertIn("fake: available", output.getvalue())
 
     @patch("cortex_relay.cli.default_registry", return_value=FakeRegistry())
+    def test_delegate_accepts_new_codex_efforts(self, _registry):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(["delegate", "Review auth", "--provider", "codex", "--model", "gpt-6-luna", "--reasoning", "max"])
+        self.assertEqual(code, 0)
+
+    @patch("cortex_relay.cli.default_registry", return_value=FakeRegistry())
     def test_delegate_json(self, _registry):
         output = io.StringIO()
         with redirect_stdout(output):
