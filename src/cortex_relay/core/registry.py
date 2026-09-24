@@ -79,12 +79,15 @@ class ProviderRegistry:
         metadata = dict(task.metadata)
         metadata["_task_id"] = task_id
         metadata["_observability_workspace"] = str(source_workspace)
-        def progress_line(provider: str, line: str) -> None:
-            event = normalize_progress(provider, line, task_id)
+        def progress_line(provider: str, line: str, stream: str = "stdout") -> None:
+            event = normalize_progress(provider, line, task_id, stream)
             if event is not None:
                 self.run_store.record_progress(source_workspace, event)
 
         metadata["_progress_line"] = progress_line
+        metadata["_progress_heartbeat"] = lambda pid, alive: self.run_store.record_heartbeat(
+            source_workspace, task_id, pid, alive
+        )
         task = replace(task, metadata=metadata)
 
         try:

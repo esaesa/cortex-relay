@@ -73,6 +73,12 @@ class AsyncTaskManager:
             return {"task_id": task_id, "status": "unknown"}
         return record
 
+    def events(self, task_id: str, *, after_sequence: int = 0, limit: int = 20) -> dict[str, Any]:
+        job = self._job(task_id)
+        return self.registry.run_store.list_events(
+            job.workspace, task_id, after_sequence=after_sequence, limit=limit
+        )
+
     def wait(self, task_id: str, *, timeout_seconds: float = 0) -> dict[str, Any]:
         job = self._job(task_id)
         if timeout_seconds < 0:

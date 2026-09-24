@@ -252,7 +252,7 @@ python -m pip install -e ".[mcp]"
 cortex-relay serve --transport mcp
 ```
 
-The MCP surface includes `providers`, `profiles`, `status`, `history`, `delegate`, `delegate_parallel`, `delegate_async`, `task_status`, `task_wait`, `task_cancel`, and `tasks`. OpenCode, Codex, and Antigravity are available through the same tools when their CLIs are installed. Async tasks report observable tool activity to the status watcher while they run; use `task_wait` for the full result.
+The MCP surface includes `providers`, `profiles`, `status`, `history`, `delegate`, `delegate_parallel`, `delegate_async`, `task_status`, `task_events`, `task_wait`, `task_cancel`, and `tasks`. OpenCode, Codex, and Antigravity are available through the same tools when their CLIs are installed. Async tasks report observable tool activity to the status watcher while they run; use `status --watch -v` for recent actions, `-vv` for bounded output previews, `task_events` for cursor-based updates, and `task_wait` for the full result.
 
 See [Runtime delegation](docs/runtime.md) and [Architecture](docs/architecture.md) for the shared MCP/A2A runtime design.
 

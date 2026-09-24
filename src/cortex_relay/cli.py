@@ -102,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--workspace", type=Path, default=Path.cwd())
     status_parser.add_argument("--limit", type=int, default=12)
     status_parser.add_argument("--watch", action="store_true")
+    status_parser.add_argument("-v", "--verbose", action="count", default=0)
     status_parser.add_argument("--interval", type=float, default=1.0)
     status_parser.add_argument("--active-only", action="store_true")
     status_parser.add_argument("--json", action="store_true", dest="as_json")
@@ -373,13 +374,17 @@ def _status(args: argparse.Namespace, *, completed_only: bool = False) -> int:
                 snapshot(),
                 title="CortexRelay history" if completed_only else "CortexRelay status",
                 completed_only=completed_only,
+                verbosity=getattr(args, "verbose", 0),
             )
         )
         return 0
 
     try:
         while True:
-            view = render_dashboard(snapshot(), title="CortexRelay live status")
+            view = render_dashboard(
+                snapshot(), title="CortexRelay live status",
+                verbosity=getattr(args, "verbose", 0),
+            )
             if sys.stdout.isatty():
                 print("\033[2J\033[H", end="")
             _print_dashboard(view)

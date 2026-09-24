@@ -30,7 +30,7 @@ def create_server(
         instructions=(
             "Delegate bounded coding-agent work to registered external providers. "
             "The calling agent remains responsible for planning and final synthesis. "
-            "Use delegate_async for longer or parallel work, then task_status, "
+            "Use delegate_async for longer or parallel work, then task_status, task_events, "
             "short task_wait polls, or task_cancel by task ID. Never pass a provider "
             "timeout to task_wait. Set access=workspace_write "
             "explicitly for implementation tasks. Use status/history to inspect work."
@@ -147,6 +147,13 @@ def create_server(
     def task_status(task_id: str) -> dict[str, Any]:
         """Return the latest persisted progress for an async delegation."""
         return async_tasks.status(task_id)
+
+    @server.tool()
+    def task_events(
+        task_id: str, after_sequence: int = 0, limit: int = 20
+    ) -> dict[str, Any]:
+        """Return observable child activity after a sequence cursor (up to 100 events)."""
+        return async_tasks.events(task_id, after_sequence=after_sequence, limit=limit)
 
     @server.tool()
     def task_wait(task_id: str, timeout_seconds: float = 0) -> dict[str, Any]:

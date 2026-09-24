@@ -5,6 +5,7 @@ import json
 import os
 import time
 
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -128,6 +129,9 @@ class RunStore:
             "last_event_at": None,
             "progress_sequence": 0,
             "recent_events": [],
+            "progress_files": [],
+            "process_alive": False,
+            "last_heartbeat_at": None,
         }
         self._write_record(self._task_path(task.workspace, task_id), record)
         return task_id
@@ -161,18 +165,9 @@ class RunStore:
                     pass
         now = _utc_now()
         sequence = int(record.get("progress_sequence") or 0) + 1
-        activity = {
-            "sequence": sequence,
-            "at": now,
-            "phase": event.phase,
-            "state": event.state,
-            "activity": event.activity,
-            "tool": event.tool,
-            "command": event.command,
-            "path": event.path,
-            "input_tokens": event.input_tokens,
-            "output_tokens": event.output_tokens,
-        }
+        activity = asdict(event)
+        activity.update(sequence=sequence, at=now)
+        self._append_event(workspace, event.task_id, activity)
         recent = record.get("recent_events")
         recent = recent if isinstance(recent, list) else []
         record.update(
@@ -180,16 +175,78 @@ class RunStore:
             current_tool=event.tool,
             current_command=event.command,
             current_path=event.path,
+            current_exit_code=event.exit_code,
+            current_duration_seconds=event.duration_seconds,
+            current_output_preview=event.output_preview,
+            current_error_preview=event.error_preview,
+            current_subagents=activity["subagents"],
+            current_plan=activity["plan"] if event.plan else record.get("current_plan", []),
             last_event_at=now,
             progress_sequence=sequence,
-            recent_events=[*recent[-7:], activity],
+            recent_events=[*recent[-49:], activity],
             updated_at=now,
         )
         if event.input_tokens is not None:
             record["progress_input_tokens"] = event.input_tokens
         if event.output_tokens is not None:
             record["progress_output_tokens"] = event.output_tokens
+        if event.total_tokens is not None:
+            record["progress_total_tokens"] = event.total_tokens
+        if event.cache_tokens is not None:
+            record["progress_cache_tokens"] = event.cache_tokens
+        if event.files:
+            known = record.get("progress_files") or []
+            record["progress_files"] = list(dict.fromkeys([*known, *event.files]))[:100]
         self._write_record(path, record)
+
+    def record_heartbeat(self, workspace: Path, task_id: str, pid: int, alive: bool) -> None:
+        path = self._task_path(workspace, task_id)
+        record = self._read_record(path)
+        if not record or record.get("status") in TERMINAL_STATUSES:
+            return
+        record.update(provider_pid=pid, process_alive=alive, last_heartbeat_at=_utc_now())
+        self._write_record(path, record)
+
+    def list_events(
+        self, workspace: Path, task_id: str, *, after_sequence: int = 0, limit: int = 20
+    ) -> dict[str, Any]:
+        if after_sequence < 0 or not 1 <= limit <= 100:
+            raise ValueError("after_sequence must be non-negative and limit must be 1..100")
+        record = self.get_task(workspace, task_id)
+        if record is None:
+            raise ValueError(f"unknown task id: {task_id}")
+        path = self._events_path(workspace, task_id)
+        events: list[dict[str, Any]] = []
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(event, dict) and int(event.get("sequence") or 0) > after_sequence:
+                        events.append(event)
+                        if len(events) >= limit:
+                            break
+        except OSError:
+            events = [
+                event for event in record.get("recent_events", [])
+                if isinstance(event, dict) and int(event.get("sequence") or 0) > after_sequence
+            ][:limit]
+        return {
+            "task_id": task_id,
+            "events": events,
+            "next_sequence": int(events[-1]["sequence"]) if events else after_sequence,
+        }
+
+    def _append_event(self, workspace: Path, task_id: str, event: dict[str, Any]) -> None:
+        path = self._events_path(workspace, task_id)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except OSError:
+            pass
 
     def complete_task(
         self,
@@ -205,6 +262,7 @@ class RunStore:
         record.update(
             {
                 "status": result.status,
+                "process_alive": False,
                 "provider": result.provider,
                 "model": result.model,
                 "updated_at": now,
@@ -323,6 +381,9 @@ class RunStore:
             if record and record.get("status") in TERMINAL_STATUSES:
                 try:
                     path.unlink()
+                    task_id = record.get("task_id")
+                    if isinstance(task_id, str):
+                        self._events_path(workspace, task_id).unlink(missing_ok=True)
                     removed += 1
                 except OSError:
                     pass
@@ -335,6 +396,9 @@ class RunStore:
 
     def _task_path(self, workspace: Path, task_id: str) -> Path:
         return self._workspace_dir(workspace) / "tasks" / f"{_safe_id(task_id)}.json"
+
+    def _events_path(self, workspace: Path, task_id: str) -> Path:
+        return self._workspace_dir(workspace) / "events" / f"{_safe_id(task_id)}.jsonl"
 
     def _session_path(self, workspace: Path, session_id: str) -> Path:
         return self._workspace_dir(workspace) / "sessions" / f"{_safe_id(session_id)}.json"
@@ -420,6 +484,7 @@ def render_dashboard(
     *,
     title: str = "CortexRelay status",
     completed_only: bool = False,
+    verbosity: int = 0,
 ) -> str:
     lines: list[str] = [title, "=" * len(title)]
     lines.append(f"Workspace: {snapshot.get('workspace', '')}")
@@ -491,6 +556,9 @@ def render_dashboard(
         files = item.get("changed_files")
         if isinstance(files, list) and files:
             details.append(f"{len(files)} file{'s' if len(files) != 1 else ''}")
+        elif status in ACTIVE_STATUSES and item.get("progress_files"):
+            count = len(item["progress_files"])
+            details.append(f"{count} file{'s' if count != 1 else ''} observed")
         worktree = item.get("worktree_path")
         if worktree:
             details.append(f"worktree {worktree}")
@@ -510,6 +578,15 @@ def render_dashboard(
                 lines.append(
                     f"  Tokens reported: {input_tokens or 0} in / {output_tokens or 0} out"
                 )
+            if verbosity:
+                if item.get("current_exit_code") is not None:
+                    lines.append(f"  Exit: {item['current_exit_code']}")
+                if item.get("current_duration_seconds") is not None:
+                    lines.append(f"  Duration: {float(item['current_duration_seconds']):.1f}s")
+                if item.get("current_output_preview"):
+                    lines.append(f"  Result: {_truncate(str(item['current_output_preview']), 180)}")
+                if item.get("current_error_preview"):
+                    lines.append(f"  Diagnostic: {_truncate(str(item['current_error_preview']), 180)}")
         if status in ACTIVE_STATUSES:
             last_event = item.get("last_event_at")
             if isinstance(last_event, str):
@@ -519,6 +596,55 @@ def render_dashboard(
                 )
             else:
                 lines.append("  Provider events: waiting")
+            heartbeat = item.get("last_heartbeat_at")
+            if isinstance(heartbeat, str):
+                age = _elapsed({"started_at": heartbeat}, now)
+                try:
+                    fresh = now - datetime.fromisoformat(heartbeat).timestamp() < 15
+                except ValueError:
+                    fresh = False
+                state = "alive" if item.get("process_alive") and fresh else "not recently observed"
+                lines.append(f"  Process: {state} | heartbeat {age} ago")
+            elif item.get("current_activity"):
+                lines.append("  Process: heartbeat pending")
+
+        if verbosity:
+            recent = item.get("recent_events")
+            if isinstance(recent, list) and recent:
+                lines.append("  Recent activity:")
+                for event in recent[-(15 if verbosity >= 2 else 5):]:
+                    if not isinstance(event, dict):
+                        continue
+                    at = str(event.get("at") or "")
+                    try:
+                        clock = datetime.fromisoformat(at).astimezone().strftime("%H:%M:%S")
+                    except ValueError:
+                        clock = "--:--:--"
+                    action = str(event.get("activity") or event.get("phase") or "activity")
+                    target = event.get("command") or event.get("path")
+                    detail = f"  {clock}  {action}"
+                    if target:
+                        detail += f"  {_truncate(str(target), 110)}"
+                    if event.get("exit_code") is not None:
+                        detail += f"  exit={event['exit_code']}"
+                    if event.get("duration_seconds") is not None:
+                        detail += f"  {float(event['duration_seconds']):.1f}s"
+                    lines.append(detail)
+                    if verbosity >= 2:
+                        for key in ("output_preview", "error_preview"):
+                            if event.get(key):
+                                lines.append(f"    {key}: {_truncate(str(event[key]), 180)}")
+                        for agent in event.get("subagents") or []:
+                            if isinstance(agent, dict):
+                                lines.append(
+                                    f"    subagent: {agent.get('role') or agent.get('type') or agent.get('conversation_id') or '?'} "
+                                    f"{agent.get('state') or ''}"
+                                )
+                if verbosity >= 2 and item.get("current_plan"):
+                    lines.append("  Plan:")
+                    for step in item["current_plan"]:
+                        if isinstance(step, dict):
+                            lines.append(f"    {'✓' if step.get('completed') else '○'} {step.get('text') or ''}")
 
         error = item.get("error")
         if error:

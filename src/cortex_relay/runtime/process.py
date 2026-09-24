@@ -103,6 +103,7 @@ class ProcessRunner:
         cancel_event: threading.Event | None = None,
         on_stdout_line: Callable[[str], None] | None = None,
         on_stderr_line: Callable[[str], None] | None = None,
+        on_heartbeat: Callable[[int, bool], None] | None = None,
     ) -> ProcessResult:
         original_argv = list(argv)
         process_argv = prepare_process_argv(original_argv)
@@ -115,11 +116,12 @@ class ProcessRunner:
             stderr=subprocess.PIPE,
         )
         started = time.monotonic()
+        self._heartbeat(on_heartbeat, process.pid, True)
 
         if on_stdout_line is not None or on_stderr_line is not None:
             return self._stream(
                 process, original_argv, started, timeout_seconds, cancel_event,
-                on_stdout_line, on_stderr_line,
+                on_stdout_line, on_stderr_line, on_heartbeat,
             )
 
         while True:
@@ -153,6 +155,7 @@ class ProcessRunner:
         cancel_event: threading.Event | None,
         on_stdout_line: Callable[[str], None] | None,
         on_stderr_line: Callable[[str], None] | None,
+        on_heartbeat: Callable[[int, bool], None] | None,
     ) -> ProcessResult:
         events: queue.Queue[tuple[str, str | None]] = queue.Queue()
         output: dict[str, list[str]] = {"stdout": [], "stderr": []}
@@ -175,8 +178,12 @@ class ProcessRunner:
 
         finished = 0
         exited_at: float | None = None
+        last_heartbeat = time.monotonic()
         try:
             while finished < 2:
+                if time.monotonic() - last_heartbeat >= 5:
+                    self._heartbeat(on_heartbeat, process.pid, process.poll() is None)
+                    last_heartbeat = time.monotonic()
                 if cancel_event is not None and cancel_event.is_set():
                     raise ProcessCancelledError("provider process cancelled")
                 remaining = timeout_seconds - (time.monotonic() - started)
@@ -203,6 +210,9 @@ class ProcessRunner:
                         # Observability must not fail provider execution.
                         pass
             while process.poll() is None:
+                if time.monotonic() - last_heartbeat >= 5:
+                    self._heartbeat(on_heartbeat, process.pid, True)
+                    last_heartbeat = time.monotonic()
                 if cancel_event is not None and cancel_event.is_set():
                     raise ProcessCancelledError("provider process cancelled")
                 remaining = timeout_seconds - (time.monotonic() - started)
@@ -220,8 +230,17 @@ class ProcessRunner:
             self._terminate(process, communicating=False)
             raise
         finally:
+            self._heartbeat(on_heartbeat, process.pid, False)
             for reader in readers:
                 reader.join(timeout=0.1)
+
+    @staticmethod
+    def _heartbeat(callback: Callable[[int, bool], None] | None, pid: int, alive: bool) -> None:
+        if callback is not None:
+            try:
+                callback(pid, alive)
+            except Exception:
+                pass
 
     @staticmethod
     def _terminate(process: subprocess.Popen[str], *, communicating: bool = True) -> None:
