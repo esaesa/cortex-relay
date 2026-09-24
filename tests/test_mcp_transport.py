@@ -36,6 +36,26 @@ class MCPTransportMappingTests(unittest.TestCase):
         )
         self.assertTrue(task.isolate_write)
 
+    def test_mapping_preserves_budgets_and_quality_gates(self):
+        task = _task_from_mapping(
+            {
+                "objective": "Implement safely",
+                "access": "workspace_write",
+                "max_tokens": 12000,
+                "max_cost": 0.25,
+                "require_changed_files": True,
+                "require_tests": True,
+                "allowed_paths": ["src/**", "tests/**"],
+                "max_failed_tests": 0,
+            }
+        )
+        self.assertEqual(task.budget.max_tokens, 12000)
+        self.assertEqual(task.budget.max_cost, 0.25)
+        self.assertTrue(task.quality_gates.require_changed_files)
+        self.assertTrue(task.quality_gates.require_tests)
+        self.assertEqual(task.quality_gates.max_failed_tests, 0)
+        self.assertEqual(task.quality_gates.allowed_paths, ("src/**", "tests/**"))
+
     def test_invalid_access_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "access"):
             _task_from_values(
