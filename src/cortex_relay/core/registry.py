@@ -4,7 +4,7 @@ import subprocess
 
 from dataclasses import replace
 from typing import Any
-from uuid import uuid4
+from datetime import datetime, timezone
 
 from cortex_relay.core.models import TaskResult, TaskSpec
 from cortex_relay.core.policy import RoutingPolicy
@@ -199,6 +199,10 @@ class ProviderRegistry:
                 )
             else:
                 effective = self._task_for_profile(task, candidate)
+                effective = replace(
+                    effective,
+                    metadata={**effective.metadata, "_worktree_attempt": index},
+                )
                 result = self._execute_provider(effective)
 
             attempts.append(
@@ -291,9 +295,14 @@ class ProviderRegistry:
             return provider.execute(task)
 
         self._observe(task, status="preparing", provider=provider.name)
-        task_id = f"{task.role}-{uuid4().hex[:10]}"
+        task_id = task.metadata.get("_task_id")
+        if not isinstance(task_id, str):
+            raise ValueError("isolated execution requires an owning task ID")
+        attempt = int(task.metadata.get("_worktree_attempt", 1))
         try:
-            worktree = self.worktrees.create(task.workspace, task_id=task_id)
+            worktree = self.worktrees.create(
+                task.workspace, task_id=task_id, attempt=attempt
+            )
         except (OSError, subprocess.CalledProcessError) as exc:
             return TaskResult(
                 status="error",
@@ -301,6 +310,23 @@ class ProviderRegistry:
                 model=task.model,
                 summary="Could not create an isolated git worktree.",
                 error=str(exc),
+            )
+
+        source_workspace = task.metadata.get("_observability_workspace")
+        if isinstance(source_workspace, str):
+            self.run_store.record_worktree_attempt(
+                source_workspace,
+                task_id,
+                {
+                    "attempt": attempt,
+                    "profile": task.profile,
+                    "source_repository": str(task.workspace.resolve()),
+                    "path": str(worktree.path),
+                    "branch": worktree.branch,
+                    "base_commit": worktree.base_commit,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "handoff_status": None,
+                },
             )
 
         self._observe(
@@ -311,12 +337,15 @@ class ProviderRegistry:
             reasoning=task.reasoning,
             worktree_path=str(worktree.path),
             worktree_branch=worktree.branch,
+            worktree_base_commit=worktree.base_commit,
         )
         if cancel_event is not None and cancel_event.is_set():
             return TaskResult(
                 status="cancelled", provider=provider.name, model=task.model,
                 summary="Delegation cancelled before provider launch.",
-                metadata={"worktree_path": str(worktree.path), "worktree_branch": worktree.branch},
+                metadata={"worktree_path": str(worktree.path),
+                          "worktree_branch": worktree.branch,
+                          "worktree_base_commit": worktree.base_commit},
             )
         isolated = replace(task, workspace=worktree.path, isolate_write=False)
         result = provider.execute(isolated)
@@ -325,6 +354,7 @@ class ProviderRegistry:
             {
                 "worktree_path": str(worktree.path),
                 "worktree_branch": worktree.branch,
+                "worktree_base_commit": worktree.base_commit,
                 "source_workspace": str(task.workspace),
             }
         )

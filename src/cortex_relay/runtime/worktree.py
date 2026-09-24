@@ -14,6 +14,7 @@ _SAFE_ID = re.compile(r"[^a-zA-Z0-9_.-]+")
 class Worktree:
     path: Path
     branch: str
+    base_commit: str = ""
 
 
 class WorktreeManager:
@@ -27,11 +28,14 @@ class WorktreeManager:
         repository: Path,
         *,
         task_id: str,
+        attempt: int = 1,
         base_ref: str = "HEAD",
         root: Path | None = None,
     ) -> Worktree:
         repository = repository.expanduser().resolve()
-        safe_id = _SAFE_ID.sub("-", task_id).strip("-") or "task"
+        if attempt < 1:
+            raise ValueError("worktree attempt must be positive")
+        safe_id = (_SAFE_ID.sub("-", task_id).strip("-") or "task") + f"-a{attempt}"
         branch = f"cortex/{safe_id}"
         parent = (
             root
@@ -44,14 +48,18 @@ class WorktreeManager:
             raise FileExistsError(f"worktree path already exists: {path}")
 
         with self._git_lock:
+            base_commit = subprocess.run(
+                ["git", "rev-parse", "--verify", f"{base_ref}^{{commit}}"],
+                cwd=repository, check=True, text=True, capture_output=True,
+            ).stdout.strip()
             subprocess.run(
-                ["git", "worktree", "add", "-b", branch, str(path), base_ref],
+                ["git", "worktree", "add", "-b", branch, str(path), base_commit],
                 cwd=repository,
                 check=True,
                 text=True,
                 capture_output=True,
             )
-        return Worktree(path=path, branch=branch)
+        return Worktree(path=path, branch=branch, base_commit=base_commit)
 
     def remove(self, repository: Path, worktree: Worktree, *, force: bool = False) -> None:
         argv = ["git", "worktree", "remove"]
