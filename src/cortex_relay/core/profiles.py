@@ -49,6 +49,55 @@ class ExecutionProfile:
 
 
 @dataclass(frozen=True)
+class SchedulerConfig:
+    max_workers: int = 4
+    provider_limits: dict[str, int] = field(default_factory=dict)
+    profile_limits: dict[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.max_workers < 1:
+            raise ValueError("scheduler.max_workers must be positive")
+        for label, values in (
+            ("scheduler.providers", self.provider_limits),
+            ("scheduler.profiles", self.profile_limits),
+        ):
+            if any(value < 1 for value in values.values()):
+                raise ValueError(f"{label} limits must be positive")
+
+
+@dataclass(frozen=True)
+class BudgetConfig:
+    max_session_tokens: int | None = None
+    max_group_tokens: int | None = None
+    max_premium_tasks: int | None = None
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("max_session_tokens", self.max_session_tokens),
+            ("max_group_tokens", self.max_group_tokens),
+            ("max_premium_tasks", self.max_premium_tasks),
+        ):
+            if value is not None and value < 1:
+                raise ValueError(f"budgets.{name} must be positive")
+
+
+@dataclass(frozen=True)
+class StateConfig:
+    retention_days: int = 30
+    max_completed_tasks: int = 1000
+    max_event_log_mb: int = 10
+    cleanup_on_start: bool = True
+
+    def __post_init__(self) -> None:
+        if self.retention_days < 1:
+            raise ValueError("state.retention_days must be positive")
+        if self.max_completed_tasks < 1:
+            raise ValueError("state.max_completed_tasks must be positive")
+        if self.max_event_log_mb < 1:
+            raise ValueError("state.max_event_log_mb must be positive")
+
+
+@dataclass(frozen=True)
 class RuntimePreset:
     name: str
     roles: dict[str, str] = field(default_factory=dict)
@@ -60,6 +109,9 @@ class RuntimeProfileConfig:
     roles: dict[str, str] = field(default_factory=dict)
     presets: dict[str, RuntimePreset] = field(default_factory=dict)
     active_preset: str | None = None
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    budgets: BudgetConfig = field(default_factory=BudgetConfig)
+    state: StateConfig = field(default_factory=StateConfig)
     sources: tuple[Path, ...] = ()
 
     def effective_roles(self, preset: str | None = None) -> dict[str, str]:
@@ -133,6 +185,22 @@ class RuntimeProfileConfig:
             "presets": {
                 name: {"roles": dict(sorted(item.roles.items()))}
                 for name, item in sorted(self.presets.items())
+            },
+            "scheduler": {
+                "max_workers": self.scheduler.max_workers,
+                "providers": dict(sorted(self.scheduler.provider_limits.items())),
+                "profiles": dict(sorted(self.scheduler.profile_limits.items())),
+            },
+            "budgets": {
+                "max_session_tokens": self.budgets.max_session_tokens,
+                "max_group_tokens": self.budgets.max_group_tokens,
+                "max_premium_tasks": self.budgets.max_premium_tasks,
+            },
+            "state": {
+                "retention_days": self.state.retention_days,
+                "max_completed_tasks": self.state.max_completed_tasks,
+                "max_event_log_mb": self.state.max_event_log_mb,
+                "cleanup_on_start": self.state.cleanup_on_start,
             },
         }
 
@@ -232,11 +300,52 @@ def runtime_config_from_mapping(
     active_value = data.get("active_preset")
     active_preset = str(active_value).strip() if active_value is not None else None
 
+    raw_scheduler = data.get("scheduler", {})
+    if raw_scheduler is None:
+        raw_scheduler = {}
+    if not isinstance(raw_scheduler, dict):
+        raise ValueError("[scheduler] must be a table")
+    scheduler = SchedulerConfig(
+        max_workers=int(raw_scheduler.get("max_workers", 4)),
+        provider_limits=_positive_int_mapping(
+            raw_scheduler.get("providers", {}), "[scheduler.providers]"
+        ),
+        profile_limits=_positive_int_mapping(
+            raw_scheduler.get("profiles", {}), "[scheduler.profiles]"
+        ),
+    )
+
+    raw_budgets = data.get("budgets", {})
+    if raw_budgets is None:
+        raw_budgets = {}
+    if not isinstance(raw_budgets, dict):
+        raise ValueError("[budgets] must be a table")
+    budgets = BudgetConfig(
+        max_session_tokens=_optional_positive_int(raw_budgets.get("max_session_tokens")),
+        max_group_tokens=_optional_positive_int(raw_budgets.get("max_group_tokens")),
+        max_premium_tasks=_optional_positive_int(raw_budgets.get("max_premium_tasks")),
+    )
+
+    raw_state = data.get("state", {})
+    if raw_state is None:
+        raw_state = {}
+    if not isinstance(raw_state, dict):
+        raise ValueError("[state] must be a table")
+    state = StateConfig(
+        retention_days=int(raw_state.get("retention_days", 30)),
+        max_completed_tasks=int(raw_state.get("max_completed_tasks", 1000)),
+        max_event_log_mb=int(raw_state.get("max_event_log_mb", 10)),
+        cleanup_on_start=bool(raw_state.get("cleanup_on_start", True)),
+    )
+
     config = RuntimeProfileConfig(
         profiles=profiles,
         roles=roles,
         presets=presets,
         active_preset=active_preset or None,
+        scheduler=scheduler,
+        budgets=budgets,
+        state=state,
         sources=sources,
     )
     _validate_references(config)
@@ -295,3 +404,26 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         return ()
     return tuple(str(item).strip() for item in value if str(item).strip())
+
+
+def _positive_int_mapping(value: Any, label: str) -> dict[str, int]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a table")
+    result: dict[str, int] = {}
+    for key, item in value.items():
+        parsed = int(item)
+        if parsed < 1:
+            raise ValueError(f"{label}.{key} must be positive")
+        result[str(key)] = parsed
+    return result
+
+
+def _optional_positive_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError("budget values must be positive")
+    return parsed
