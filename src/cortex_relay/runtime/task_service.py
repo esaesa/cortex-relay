@@ -625,7 +625,25 @@ class TaskService:
         )
 
     def status(self, task_id: str) -> dict[str, Any]:
-        return self._resolve(task_id)[1]
+        record = self._resolve(task_id)[1]
+        with self._lock:
+            job = self._jobs.get(task_id)
+            finalizing = bool(
+                job is not None
+                and job.future is not None
+                and not job.future.done()
+                and record.get("status") in TERMINAL_STATUSES
+            )
+        if finalizing:
+            return {
+                **record,
+                "workflow_finalizing": True,
+                "current_activity": (
+                    record.get("current_activity")
+                    or "Provider completed; finalizing workflow state"
+                ),
+            }
+        return record
 
     def events(
         self, task_id: str, *, after_sequence: int = 0, limit: int = 20
@@ -644,12 +662,21 @@ class TaskService:
         wait_seconds = min(timeout_seconds, 5.0)
         with self._lock:
             job = self._jobs.get(task_id)
+        local_pending = False
         if job is not None and job.future is not None:
             try:
                 job.future.result(timeout=wait_seconds)
-            except (TimeoutError, CancelledError):
-                pass
+            except TimeoutError:
+                local_pending = not job.future.done()
+            except CancelledError:
+                local_pending = False
         workspace, record = self._resolve(task_id)
+        if local_pending:
+            return {
+                **record,
+                "workflow_finalizing": record.get("status") in TERMINAL_STATUSES,
+                "waited_seconds": wait_seconds,
+            }
         if record.get("status") in TERMINAL_STATUSES:
             result = self.store.get_result(workspace, task_id)
             if result is None:
