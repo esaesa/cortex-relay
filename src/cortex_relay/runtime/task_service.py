@@ -509,11 +509,13 @@ class TaskService:
         if result.status != self.status(task_id).get("status"):
             self.store.complete_task(task.workspace, task_id, result)
 
-        if result.status == "success" and task.access == "workspace_write":
+        if (
+            result.status == "success"
+            and task.access == "workspace_write"
+            and task.isolate_write
+        ):
             record = self.store.get_task(task.workspace, task_id) or {}
-            if record.get("worktree_path") and (
-                result.changed_files or record.get("progress_files")
-            ):
+            if result.changed_files or record.get("progress_files"):
                 try:
                     artifact = self.artifacts.create(task_id)
                     self.store.update_task(
