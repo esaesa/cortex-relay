@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import re
+
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 
 TaskAccess = Literal["read_only", "workspace_write"]
-TaskStatus = Literal["success", "error", "timeout", "unavailable"]
+TaskStatus = Literal["success", "error", "timeout", "unavailable", "cancelled"]
 ReasoningLevel = str
 
 _REASONING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -19,6 +20,8 @@ class TaskSpec:
 
     objective: str
     role: str = "reviewer"
+    profile: str | None = None
+    preset: str | None = None
     provider: str = "auto"
     workspace: Path = field(default_factory=Path.cwd)
     access: TaskAccess = "read_only"
@@ -45,6 +48,20 @@ class TaskSpec:
         object.__setattr__(self, "reasoning", self.reasoning.lower())
         object.__setattr__(
             self,
+            "profile",
+            self.profile.strip()
+            if isinstance(self.profile, str) and self.profile.strip()
+            else None,
+        )
+        object.__setattr__(
+            self,
+            "preset",
+            self.preset.strip()
+            if isinstance(self.preset, str) and self.preset.strip()
+            else None,
+        )
+        object.__setattr__(
+            self,
             "acceptance_criteria",
             tuple(item.strip() for item in self.acceptance_criteria if item.strip()),
         )
@@ -53,6 +70,8 @@ class TaskSpec:
         return {
             "objective": self.objective,
             "role": self.role,
+            "profile": self.profile,
+            "preset": self.preset,
             "provider": self.provider,
             "workspace": str(self.workspace),
             "access": self.access,
