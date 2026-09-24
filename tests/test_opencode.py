@@ -116,6 +116,7 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertIn("max", argv)
         self.assertNotIn("--auto", argv)
 
+        self.assertEqual(call["env"]["OPENCODE_CLIENT"], "cortex-relay")
         config = json.loads(call["env"]["OPENCODE_CONFIG_CONTENT"])
         self.assertEqual(config["permission"]["edit"], "allow")
         self.assertEqual(config["permission"]["external_directory"], "deny")
