@@ -189,6 +189,32 @@ opencode/gpt-6-luna
         self.assertNotIn("--variant", command)
         self.assertIsNone(adapter._variant_error(task))
 
+    def test_host_command_uses_variant_selector_and_injects_cortex_mcp(self):
+        adapter = OpenCodeAdapter()
+        with tempfile.TemporaryDirectory() as tmp:
+            task = TaskSpec(
+                objective="Orchestrate",
+                role="orchestrator",
+                provider="opencode",
+                model="opencode/muse",
+                reasoning="xhigh",
+                workspace=Path(tmp),
+                access="read_only",
+            )
+            command = adapter.host_command(task)
+            env = adapter.host_environment(task)
+
+        self.assertEqual(command[0], "opencode")
+        self.assertIn("--model", command)
+        self.assertIn("opencode/muse#xhigh", command)
+        config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        server = config["mcp"]["servers"]["cortex-relay"]
+        self.assertEqual(server["type"], "local")
+        self.assertIn("cortex_relay.cli", server["command"])
+        self.assertEqual(config["permission"]["task"], "deny")
+        self.assertEqual(config["permission"]["edit"], "deny")
+        self.assertEqual(env["OPENCODE_CLIENT"], "cortex-relay-orchestrator")
+
     @patch("cortex_relay.providers.opencode.shutil.which", return_value=None)
     def test_missing_binary_returns_unavailable(self, _which):
         result = OpenCodeAdapter().execute(
