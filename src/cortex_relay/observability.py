@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from cortex_relay.core.models import TaskResult, TaskSpec
+from cortex_relay.runtime.progress import ProgressEvent
 
 ACTIVE_STATUSES = {"routing", "preparing", "running", "fallback"}
 TERMINAL_STATUSES = {"success", "error", "timeout", "unavailable", "cancelled"}
@@ -119,6 +120,14 @@ class RunStore:
             "error": None,
             "conversation_id": None,
             "owner_pid": os.getpid(),
+            "timeout_seconds": task.timeout_seconds,
+            "current_activity": None,
+            "current_tool": None,
+            "current_command": None,
+            "current_path": None,
+            "last_event_at": None,
+            "progress_sequence": 0,
+            "recent_events": [],
         }
         self._write_record(self._task_path(task.workspace, task_id), record)
         return task_id
@@ -133,6 +142,53 @@ class RunStore:
         record = self._read_record(path) or {}
         record.update(updates)
         record["updated_at"] = _utc_now()
+        self._write_record(path, record)
+
+    def record_progress(self, workspace: Path, event: ProgressEvent) -> None:
+        """Keep only bounded, observable activity for a running task."""
+
+        path = self._task_path(workspace, event.task_id)
+        record = self._read_record(path)
+        if not record or record.get("status") in TERMINAL_STATUSES:
+            return
+        if event.phase == "response" and record.get("current_activity") == event.activity:
+            previous = record.get("last_event_at")
+            if isinstance(previous, str):
+                try:
+                    if (datetime.now(timezone.utc) - datetime.fromisoformat(previous)).total_seconds() < 2:
+                        return
+                except ValueError:
+                    pass
+        now = _utc_now()
+        sequence = int(record.get("progress_sequence") or 0) + 1
+        activity = {
+            "sequence": sequence,
+            "at": now,
+            "phase": event.phase,
+            "state": event.state,
+            "activity": event.activity,
+            "tool": event.tool,
+            "command": event.command,
+            "path": event.path,
+            "input_tokens": event.input_tokens,
+            "output_tokens": event.output_tokens,
+        }
+        recent = record.get("recent_events")
+        recent = recent if isinstance(recent, list) else []
+        record.update(
+            current_activity=event.activity,
+            current_tool=event.tool,
+            current_command=event.command,
+            current_path=event.path,
+            last_event_at=now,
+            progress_sequence=sequence,
+            recent_events=[*recent[-7:], activity],
+            updated_at=now,
+        )
+        if event.input_tokens is not None:
+            record["progress_input_tokens"] = event.input_tokens
+        if event.output_tokens is not None:
+            record["progress_output_tokens"] = event.output_tokens
         self._write_record(path, record)
 
     def complete_task(
@@ -188,6 +244,9 @@ class RunStore:
             records = [item for item in records if item.get("status") in TERMINAL_STATUSES]
         records.sort(key=lambda item: str(item.get("started_at", "")), reverse=True)
         return records[: max(1, limit)]
+
+    def get_task(self, workspace: Path, task_id: str) -> dict[str, Any] | None:
+        return self._read_record(self._task_path(workspace, task_id))
 
     def list_sessions(
         self,
@@ -283,7 +342,7 @@ class RunStore:
     def _write_record(self, path: Path, record: dict[str, Any]) -> None:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+            temporary = path.with_suffix(path.suffix + f".{os.getpid()}.{uuid4().hex}.tmp")
             temporary.write_text(
                 json.dumps(record, indent=2, ensure_ascii=False, sort_keys=True),
                 encoding="utf-8",
@@ -437,6 +496,26 @@ def render_dashboard(
             details.append(f"worktree {worktree}")
         if details:
             lines.append("  " + " | ".join(details))
+
+        activity = item.get("current_activity")
+        if status in ACTIVE_STATUSES and activity:
+            lines.append(f"  Current: {_truncate(str(activity), 96)}")
+            if item.get("current_command"):
+                lines.append(f"  Command: {_truncate(str(item['current_command']), 120)}")
+            elif item.get("current_path"):
+                lines.append(f"  Path: {_truncate(str(item['current_path']), 120)}")
+            input_tokens = item.get("progress_input_tokens")
+            output_tokens = item.get("progress_output_tokens")
+            if isinstance(input_tokens, int) or isinstance(output_tokens, int):
+                lines.append(
+                    f"  Tokens reported: {input_tokens or 0} in / {output_tokens or 0} out"
+                )
+        if status in ACTIVE_STATUSES:
+            last_event = item.get("last_event_at")
+            if isinstance(last_event, str):
+                lines.append(f"  Last provider event: {_elapsed({'started_at': last_event}, now)} ago")
+            else:
+                lines.append("  Provider events: waiting")
 
         error = item.get("error")
         if error:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import shutil
 import subprocess
 import threading
@@ -8,7 +9,7 @@ import time
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 
 class ProcessCancelledError(RuntimeError):
@@ -100,6 +101,8 @@ class ProcessRunner:
         timeout_seconds: int,
         env: Mapping[str, str] | None = None,
         cancel_event: threading.Event | None = None,
+        on_stdout_line: Callable[[str], None] | None = None,
+        on_stderr_line: Callable[[str], None] | None = None,
     ) -> ProcessResult:
         original_argv = list(argv)
         process_argv = prepare_process_argv(original_argv)
@@ -112,6 +115,12 @@ class ProcessRunner:
             stderr=subprocess.PIPE,
         )
         started = time.monotonic()
+
+        if on_stdout_line is not None or on_stderr_line is not None:
+            return self._stream(
+                process, original_argv, started, timeout_seconds, cancel_event,
+                on_stdout_line, on_stderr_line,
+            )
 
         while True:
             if cancel_event is not None and cancel_event.is_set():
@@ -135,13 +144,98 @@ class ProcessRunner:
             except subprocess.TimeoutExpired:
                 continue
 
+    def _stream(
+        self,
+        process: subprocess.Popen[str],
+        argv: list[str],
+        started: float,
+        timeout_seconds: int,
+        cancel_event: threading.Event | None,
+        on_stdout_line: Callable[[str], None] | None,
+        on_stderr_line: Callable[[str], None] | None,
+    ) -> ProcessResult:
+        events: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        output: dict[str, list[str]] = {"stdout": [], "stderr": []}
+
+        def read_pipe(name: str) -> None:
+            pipe = process.stdout if name == "stdout" else process.stderr
+            assert pipe is not None
+            try:
+                for line in pipe:
+                    events.put((name, line))
+            finally:
+                events.put((name, None))
+
+        readers = [
+            threading.Thread(target=read_pipe, args=(name,), daemon=True)
+            for name in ("stdout", "stderr")
+        ]
+        for reader in readers:
+            reader.start()
+
+        finished = 0
+        exited_at: float | None = None
+        try:
+            while finished < 2:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ProcessCancelledError("provider process cancelled")
+                remaining = timeout_seconds - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout_seconds)
+                try:
+                    name, line = events.get(timeout=min(0.2, remaining))
+                except queue.Empty:
+                    if process.poll() is not None:
+                        exited_at = exited_at or time.monotonic()
+                        # A provider may leave a descendant holding a pipe open.
+                        if time.monotonic() - exited_at >= 0.5:
+                            break
+                    continue
+                if line is None:
+                    finished += 1
+                    continue
+                output[name].append(line)
+                callback = on_stdout_line if name == "stdout" else on_stderr_line
+                if callback is not None:
+                    try:
+                        callback(line.rstrip("\r\n"))
+                    except Exception:
+                        # Observability must not fail provider execution.
+                        pass
+            while process.poll() is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ProcessCancelledError("provider process cancelled")
+                remaining = timeout_seconds - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout_seconds)
+                try:
+                    process.wait(timeout=min(0.2, remaining))
+                except subprocess.TimeoutExpired:
+                    continue
+            return ProcessResult(
+                argv=tuple(argv), returncode=process.returncode,
+                stdout="".join(output["stdout"]), stderr="".join(output["stderr"]),
+            )
+        except (ProcessCancelledError, subprocess.TimeoutExpired):
+            self._terminate(process, communicating=False)
+            raise
+        finally:
+            for reader in readers:
+                reader.join(timeout=0.1)
+
     @staticmethod
-    def _terminate(process: subprocess.Popen[str]) -> None:
+    def _terminate(process: subprocess.Popen[str], *, communicating: bool = True) -> None:
         if process.poll() is not None:
             return
         process.terminate()
         try:
-            process.communicate(timeout=5)
+            if communicating:
+                process.communicate(timeout=5)
+            else:
+                process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
-            process.communicate()
+            if communicating:
+                process.communicate()
+            else:
+                process.wait()

@@ -10,6 +10,7 @@ from typing import Any
 
 from cortex_relay.core.models import Evidence, TaskResult, TaskSpec
 from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner
+from cortex_relay.runtime.progress import runner_progress_kwargs
 
 from .base import ProviderAdapter, ProviderCapabilities
 from .codex_models import compatibility_error, known_model_ids
@@ -126,6 +127,7 @@ class CodexAdapter(ProviderAdapter):
                     cwd=task.workspace,
                     timeout_seconds=task.timeout_seconds + 15,
                     cancel_event=task.metadata.get("_cancel_event"),
+                    **runner_progress_kwargs(task, self.name),
                 )
             except ProcessCancelledError:
                 return TaskResult(

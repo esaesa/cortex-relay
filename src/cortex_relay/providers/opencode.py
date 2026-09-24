@@ -13,6 +13,7 @@ from typing import Any
 
 from cortex_relay.core.models import Evidence, TaskResult, TaskSpec
 from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner, prepare_process_argv
+from cortex_relay.runtime.progress import runner_progress_kwargs
 
 from .base import ProviderAdapter, ProviderCapabilities
 from .result_schema import RESULT_SCHEMA
@@ -224,6 +225,7 @@ class OpenCodeAdapter(ProviderAdapter):
                 timeout_seconds=task.timeout_seconds + 15,
                 env=env,
                 cancel_event=task.metadata.get("_cancel_event"),
+                **runner_progress_kwargs(task, self.name),
             )
         except ProcessCancelledError:
             return TaskResult(

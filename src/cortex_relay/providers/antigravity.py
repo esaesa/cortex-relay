@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from cortex_relay.core.models import Evidence, TaskResult, TaskSpec
+from cortex_relay.runtime.progress import runner_progress_kwargs
 from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner
 
 from .base import ProviderAdapter, ProviderCapabilities
@@ -89,7 +90,7 @@ class AntigravityAdapter(ProviderAdapter):
             "-p",
             self._prompt(task),
             "--output-format",
-            "json",
+            "stream-json" if callable(task.metadata.get("_progress_line")) else "json",
             "--json-schema",
             json.dumps(RESULT_SCHEMA, separators=(",", ":")),
             "--effort",
@@ -138,6 +139,7 @@ class AntigravityAdapter(ProviderAdapter):
                 cwd=task.workspace,
                 timeout_seconds=task.timeout_seconds + 15,
                 cancel_event=task.metadata.get("_cancel_event"),
+                **runner_progress_kwargs(task, self.name),
             )
         except ProcessCancelledError:
             return TaskResult(
@@ -158,12 +160,22 @@ class AntigravityAdapter(ProviderAdapter):
 
         stderr_text = result.stderr.strip()
         if "print timeout" in stderr_text.lower():
+            partial = self._parse_envelope(result.stdout)
+            payload = partial.get("structured_output")
+            if not isinstance(payload, dict):
+                payload = self._parse_response_payload(partial.get("response"))
+            partial_summary = str(payload.get("summary") or "").strip()
             return TaskResult(
                 status="timeout",
                 provider=self.name,
                 model=task.model,
-                summary="Antigravity task timed out before producing a final result.",
+                summary=(
+                    f"Antigravity timed out; partial result: {partial_summary}"
+                    if partial_summary else "Antigravity task timed out before producing a final result."
+                ),
                 error=stderr_text or f"timeout after {task.timeout_seconds} seconds",
+                conversation_id=_optional_string(partial.get("conversation_id")),
+                usage=_dict_or_empty(partial.get("usage")),
             )
 
         envelope = self._parse_envelope(result.stdout)
@@ -243,6 +255,18 @@ class AntigravityAdapter(ProviderAdapter):
 
     @staticmethod
     def _parse_envelope(stdout: str) -> dict[str, Any]:
+        lines = stdout.splitlines()
+        for line in reversed(lines):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict) and event.get("event") == "result":
+                result = event.get("result")
+                if isinstance(result, dict):
+                    return result
+        if len(lines) > 1:
+            return {"status": "ERROR", "error": "Antigravity stream ended without a result event"}
         try:
             parsed = json.loads(stdout)
         except json.JSONDecodeError:

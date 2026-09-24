@@ -6,9 +6,14 @@ from typing import Any
 
 from cortex_relay.core.models import TaskSpec
 from cortex_relay.core.registry import ProviderRegistry, default_registry
+from cortex_relay.runtime.async_tasks import AsyncTaskManager
 
 
-def create_server(registry: ProviderRegistry | None = None) -> Any:
+def create_server(
+    registry: ProviderRegistry | None = None,
+    *,
+    async_tasks: AsyncTaskManager | None = None,
+) -> Any:
     """Create the optional MCP v2 server without importing MCP at package import time."""
 
     try:
@@ -19,12 +24,15 @@ def create_server(registry: ProviderRegistry | None = None) -> Any:
         ) from exc
 
     runtime = registry or default_registry()
+    async_tasks = async_tasks or AsyncTaskManager(runtime)
     server = MCPServer(
         "CortexRelay",
         instructions=(
             "Delegate bounded coding-agent work to registered external providers. "
             "The calling agent remains responsible for planning and final synthesis. "
-            "Use status/history to inspect active and completed CortexRelay work."
+            "Use delegate_async for longer or parallel work, then task_status, "
+            "task_wait, or task_cancel by task ID. Set access=workspace_write "
+            "explicitly for implementation tasks. Use status/history to inspect work."
         ),
     )
 
@@ -109,6 +117,51 @@ def create_server(registry: ProviderRegistry | None = None) -> Any:
             results = list(pool.map(runtime.execute, specs))
         return [result.to_dict() for result in results]
 
+    @server.tool()
+    def delegate_async(
+        objective: str,
+        role: str = "reviewer",
+        profile: str | None = None,
+        preset: str | None = None,
+        provider: str = "auto",
+        workspace: str = ".",
+        access: str = "read_only",
+        reasoning: str = "high",
+        model: str | None = None,
+        acceptance_criteria: list[str] | None = None,
+        timeout_seconds: int = 300,
+        isolate_write: bool = True,
+    ) -> dict[str, Any]:
+        """Start a delegation and return its task ID immediately."""
+        task = _task_from_values(
+            objective=objective, role=role, profile=profile, preset=preset,
+            provider=provider, workspace=workspace, access=access,
+            reasoning=reasoning, model=model,
+            acceptance_criteria=acceptance_criteria or [],
+            timeout_seconds=timeout_seconds, isolate_write=isolate_write,
+        )
+        return async_tasks.submit(task)
+
+    @server.tool()
+    def task_status(task_id: str) -> dict[str, Any]:
+        """Return the latest persisted progress for an async delegation."""
+        return async_tasks.status(task_id)
+
+    @server.tool()
+    def task_wait(task_id: str, timeout_seconds: float = 0) -> dict[str, Any]:
+        """Return the full result when ready, or progress after the wait limit."""
+        return async_tasks.wait(task_id, timeout_seconds=timeout_seconds)
+
+    @server.tool()
+    def task_cancel(task_id: str) -> dict[str, Any]:
+        """Request cancellation of an async delegation."""
+        return async_tasks.cancel(task_id)
+
+    @server.tool()
+    def tasks(workspace: str = ".") -> list[dict[str, Any]]:
+        """List async delegations started by this MCP server for a workspace."""
+        return async_tasks.tasks(Path(workspace))
+
     return server
 
 
@@ -119,13 +172,18 @@ def run_mcp(
     port: int = 8765,
     registry: ProviderRegistry | None = None,
 ) -> None:
-    server = create_server(registry)
-    if transport == "stdio":
-        server.run("stdio")
-    elif transport == "streamable-http":
-        server.run("streamable-http", host=host, port=port)
-    else:
-        raise ValueError(f"unsupported MCP transport: {transport}")
+    runtime = registry or default_registry()
+    async_tasks = AsyncTaskManager(runtime)
+    server = create_server(runtime, async_tasks=async_tasks)
+    try:
+        if transport == "stdio":
+            server.run("stdio")
+        elif transport == "streamable-http":
+            server.run("streamable-http", host=host, port=port)
+        else:
+            raise ValueError(f"unsupported MCP transport: {transport}")
+    finally:
+        async_tasks.shutdown()
 
 
 def _task_from_mapping(data: dict[str, Any]) -> TaskSpec:

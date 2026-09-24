@@ -14,6 +14,7 @@ from cortex_relay.providers.base import ProviderAdapter
 from cortex_relay.providers.codex import CodexAdapter
 from cortex_relay.providers.opencode import OpenCodeAdapter
 from cortex_relay.observability import RunStore
+from cortex_relay.runtime.progress import normalize_progress
 from cortex_relay.runtime.worktree import WorktreeManager
 
 
@@ -71,11 +72,19 @@ class ProviderRegistry:
 
     def execute(self, task: TaskSpec) -> TaskResult:
         source_workspace = task.workspace
-        task_id = self.run_store.start_task(task)
+        task_id = task.metadata.get("_task_id") if task.metadata.get("_prestarted") else None
+        if not isinstance(task_id, str):
+            task_id = self.run_store.start_task(task)
 
         metadata = dict(task.metadata)
         metadata["_task_id"] = task_id
         metadata["_observability_workspace"] = str(source_workspace)
+        def progress_line(provider: str, line: str) -> None:
+            event = normalize_progress(provider, line, task_id)
+            if event is not None:
+                self.run_store.record_progress(source_workspace, event)
+
+        metadata["_progress_line"] = progress_line
         task = replace(task, metadata=metadata)
 
         try:
@@ -253,6 +262,12 @@ class ProviderRegistry:
         )
 
     def _execute_provider(self, task: TaskSpec) -> TaskResult:
+        cancel_event = task.metadata.get("_cancel_event")
+        if cancel_event is not None and cancel_event.is_set():
+            return TaskResult(
+                status="cancelled", provider=task.provider, model=task.model,
+                summary="Delegation cancelled before provider launch.",
+            )
         try:
             provider = self.resolve(task)
         except KeyError as exc:
@@ -296,6 +311,12 @@ class ProviderRegistry:
             worktree_path=str(worktree.path),
             worktree_branch=worktree.branch,
         )
+        if cancel_event is not None and cancel_event.is_set():
+            return TaskResult(
+                status="cancelled", provider=provider.name, model=task.model,
+                summary="Delegation cancelled before provider launch.",
+                metadata={"worktree_path": str(worktree.path), "worktree_branch": worktree.branch},
+            )
         isolated = replace(task, workspace=worktree.path, isolate_write=False)
         result = provider.execute(isolated)
         metadata = dict(result.metadata)
