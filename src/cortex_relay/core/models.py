@@ -8,7 +8,10 @@ from typing import Any, Literal
 
 
 TaskAccess = Literal["read_only", "workspace_write"]
-TaskStatus = Literal["success", "error", "timeout", "unavailable", "cancelled", "blocked", "interrupted"]
+TaskStatus = Literal[
+    "success", "error", "timeout", "unavailable", "cancelled",
+    "blocked", "interrupted", "failed_gate", "budget_exceeded",
+]
 ReasoningLevel = str
 
 _CONTEXT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
