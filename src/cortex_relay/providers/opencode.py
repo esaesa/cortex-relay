@@ -101,6 +101,7 @@ class OpenCodeAdapter(ProviderAdapter):
         before = self._git_snapshot(task.workspace) if task.access == "read_only" else None
         started = time.monotonic()
         env = dict(os.environ)
+        env["OPENCODE_CLIENT"] = "cortex-relay"
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
             self._runtime_config(task),
             separators=(",", ":"),
