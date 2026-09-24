@@ -351,7 +351,12 @@ class ProviderRegistry:
                 error=str(exc),
             )
 
-        if task.access != "workspace_write" or not task.isolate_write:
+        inherited_artifact = task.metadata.get("_inherit_artifact_id")
+        needs_inherited_workspace = isinstance(inherited_artifact, str)
+        if (
+            not needs_inherited_workspace
+            and (task.access != "workspace_write" or not task.isolate_write)
+        ):
             self._observe(
                 task,
                 status="running",
@@ -396,7 +401,6 @@ class ProviderRegistry:
                 },
             )
 
-        inherited_artifact = task.metadata.get("_inherit_artifact_id")
         if isinstance(inherited_artifact, str):
             try:
                 inheritance = ArtifactStore(self.run_store).apply_to_worktree(
