@@ -368,6 +368,24 @@ class OpenCodeAdapter(ProviderAdapter):
                 pass
 
         config = dict(existing)
+
+        # The interactive CortexRelay host injects this MCP server. A delegated
+        # OpenCode worker must not inherit it or it could recursively delegate
+        # back into CortexRelay.
+        mcp = config.get("mcp")
+        if isinstance(mcp, dict):
+            mcp_config = dict(mcp)
+            servers = mcp_config.get("servers")
+            if isinstance(servers, dict) and "cortex-relay" in servers:
+                server_config = dict(servers)
+                cortex_server = server_config.get("cortex-relay")
+                if isinstance(cortex_server, dict):
+                    disabled_server = dict(cortex_server)
+                    disabled_server["disabled"] = True
+                    server_config["cortex-relay"] = disabled_server
+                    mcp_config["servers"] = server_config
+                    config["mcp"] = mcp_config
+
         config["permission"] = _permission_policy(task.access)
         return config
 
