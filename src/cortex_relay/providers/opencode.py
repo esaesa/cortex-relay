@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from cortex_relay.core.models import Evidence, TaskResult, TaskSpec
-from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner
+from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner, prepare_process_argv
 
 from .base import ProviderAdapter, ProviderCapabilities
 from .result_schema import RESULT_SCHEMA
@@ -168,7 +168,7 @@ class OpenCodeAdapter(ProviderAdapter):
             raise RuntimeError(variant_error)
 
         completed = subprocess.run(
-            self.host_command(task),
+            prepare_process_argv(self.host_command(task)),
             cwd=task.workspace,
             env=self.host_environment(task),
             check=False,
