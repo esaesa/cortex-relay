@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import __version__
 from .configurator import ConfigValues
-from .core.models import TaskSpec
+from .core.models import QualityGates, TaskBudget, TaskSpec
 from .core.registry import default_registry
 from .diagnostics import configuration_checks, runtime_checks
 from .gemini import GEMINI_THINKING_LEVELS, GeminiConfigValues
@@ -698,11 +698,11 @@ def _delegate(args: argparse.Namespace) -> int:
         acceptance_criteria=tuple(args.acceptance_criteria),
         timeout_seconds=args.timeout_seconds,
         isolate_write=args.access == "workspace_write" and args.isolate_write,
-        budget=__import__("cortex_relay.core.models", fromlist=["TaskBudget"]).TaskBudget(
+        budget=TaskBudget(
             max_tokens=args.max_tokens,
             max_cost=args.max_cost,
         ),
-        quality_gates=__import__("cortex_relay.core.models", fromlist=["QualityGates"]).QualityGates(
+        quality_gates=QualityGates(
             require_changed_files=args.require_changed_files,
             require_tests=args.require_tests,
             allowed_paths=tuple(args.allowed_paths),
