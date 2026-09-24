@@ -80,11 +80,17 @@ class ProviderRegistry:
         metadata = dict(task.metadata)
         metadata["_task_id"] = task_id
         metadata["_observability_workspace"] = str(source_workspace)
+        external_progress = metadata.get("_external_progress")
         def progress_line(provider: str, line: str, stream: str = "stdout") -> None:
             event = normalize_progress(provider, line, task_id, stream)
             if event is None:
                 return
             self.run_store.record_progress(source_workspace, event)
+            if callable(external_progress):
+                try:
+                    external_progress(event)
+                except Exception:
+                    pass
             limit = task.budget.max_tokens
             if limit is None:
                 return
