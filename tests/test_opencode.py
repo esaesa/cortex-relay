@@ -123,6 +123,38 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertEqual(config["permission"]["task"], "deny")
         self.assertEqual(config["permission"]["bash"]["*"], "ask")
 
+    def test_worker_disables_inherited_cortex_relay_mcp(self):
+        inherited = json.dumps(
+            {
+                "mcp": {
+                    "servers": {
+                        "cortex-relay": {
+                            "type": "local",
+                            "command": ["cortex-relay", "serve", "--transport", "mcp"],
+                        },
+                        "other": {
+                            "type": "remote",
+                            "url": "https://example.invalid/mcp",
+                        },
+                    }
+                }
+            }
+        )
+        with patch.dict(
+            "os.environ",
+            {"OPENCODE_CONFIG_CONTENT": inherited},
+            clear=False,
+        ):
+            config = OpenCodeAdapter()._runtime_config(TaskSpec(objective="Review"))
+
+        self.assertTrue(
+            config["mcp"]["servers"]["cortex-relay"]["disabled"]
+        )
+        self.assertNotIn(
+            "disabled",
+            config["mcp"]["servers"]["other"],
+        )
+
     def test_permission_policy_is_read_only_when_requested(self):
         adapter = OpenCodeAdapter()
         config = adapter._runtime_config(TaskSpec(objective="Review"))
