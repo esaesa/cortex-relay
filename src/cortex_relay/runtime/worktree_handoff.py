@@ -117,7 +117,7 @@ class WorktreeHandoff:
             "exists": exists, "registered": registered,
             "task_status": record.get("status"),
             "handoff_status": item.get("handoff_status"),
-            "status_preview": status.decode("utf-8", "replace")[:2048],
+            "status_preview": status.decode("utf-8", "replace").replace("\0", "\n")[:2048],
             "status_sha256": _sha(status),
             "managed": bool(base and not item.get("legacy") and path.is_relative_to(root)),
         }
