@@ -232,10 +232,11 @@ class CortexRelayA2AExecutor(AgentExecutor):  # type: ignore[misc]
                     except queue.Empty:
                         break
                     emitted += 1
-                    await updater.start_work(
+                    await updater.update_status(
+                        TaskState.TASK_STATE_WORKING,
                         message=updater.new_agent_message(
                             parts=[Part(text=_a2a_progress_text(progress))]
-                        )
+                        ),
                     )
                 await asyncio.sleep(0.25)
             result = await worker
@@ -244,10 +245,11 @@ class CortexRelayA2AExecutor(AgentExecutor):  # type: ignore[misc]
                     progress = progress_events.get_nowait()
                 except queue.Empty:
                     break
-                await updater.start_work(
+                await updater.update_status(
+                    TaskState.TASK_STATE_WORKING,
                     message=updater.new_agent_message(
                         parts=[Part(text=_a2a_progress_text(progress))]
-                    )
+                    ),
                 )
         except asyncio.CancelledError:
             cancel_event.set()
