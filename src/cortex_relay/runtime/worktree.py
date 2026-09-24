@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,9 @@ class Worktree:
 
 class WorktreeManager:
     """Create isolated git worktrees for write-capable delegated tasks."""
+
+    def __init__(self) -> None:
+        self._git_lock = threading.Lock()
 
     def create(
         self,
@@ -39,13 +43,14 @@ class WorktreeManager:
         if path.exists():
             raise FileExistsError(f"worktree path already exists: {path}")
 
-        subprocess.run(
-            ["git", "worktree", "add", "-b", branch, str(path), base_ref],
-            cwd=repository,
-            check=True,
-            text=True,
-            capture_output=True,
-        )
+        with self._git_lock:
+            subprocess.run(
+                ["git", "worktree", "add", "-b", branch, str(path), base_ref],
+                cwd=repository,
+                check=True,
+                text=True,
+                capture_output=True,
+            )
         return Worktree(path=path, branch=branch)
 
     def remove(self, repository: Path, worktree: Worktree, *, force: bool = False) -> None:
@@ -53,10 +58,11 @@ class WorktreeManager:
         if force:
             argv.append("--force")
         argv.append(str(worktree.path))
-        subprocess.run(
-            argv,
-            cwd=repository.expanduser().resolve(),
-            check=True,
-            text=True,
-            capture_output=True,
-        )
+        with self._git_lock:
+            subprocess.run(
+                argv,
+                cwd=repository.expanduser().resolve(),
+                check=True,
+                text=True,
+                capture_output=True,
+            )
