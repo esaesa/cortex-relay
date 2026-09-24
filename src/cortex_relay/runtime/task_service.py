@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import re
 
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass, replace
@@ -19,9 +20,10 @@ from cortex_relay.runtime.state_lock import FileLock
 @dataclass
 class _Job:
     task: TaskSpec
+    prepared: TaskSpec
     workspace: Path
     cancel_event: threading.Event
-    future: Future[TaskResult]
+    future: Future[TaskResult] | None = None
     result: TaskResult | None = None
 
 
@@ -71,21 +73,92 @@ class TaskService:
             record = {**record, "owner_unknown": True}
         return workspace, record
 
-    def submit(self, task: TaskSpec) -> dict[str, Any]:
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("task service is shutting down")
-        task_id = self.store.start_task(
-            task, async_task=True, owner_instance_id=self.owner_instance_id
-        )
+    def submit(
+        self, task: TaskSpec, *, group_id: str | None = None,
+        depends_on: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        if group_id is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", group_id):
+            raise ValueError("group_id must be a bounded alphanumeric label")
+        if len(depends_on) != len(set(depends_on)):
+            raise ValueError("depends_on contains duplicate task IDs")
+        task_id = f"task-{uuid4().hex}"
+        if task_id in depends_on:
+            raise ValueError("a task cannot depend on itself")
+        for dependency in depends_on:
+            dep_workspace, record = self._resolve(dependency)
+            if dep_workspace != task.workspace or not record.get("async"):
+                raise ValueError(f"dependency must be an async task in the same workspace: {dependency}")
+
         cancel_event = threading.Event()
         metadata = dict(task.metadata)
         metadata.update(_task_id=task_id, _prestarted=True, _cancel_event=cancel_event)
         prepared = replace(task, metadata=metadata)
-        future = self.executor.submit(self._run, prepared, cancel_event)
         with self._lock:
-            self._jobs[task_id] = _Job(task, task.workspace, cancel_event, future)
-        return {"task_id": task_id, "status": "routing", "workspace": str(task.workspace)}
+            if self._closed:
+                raise RuntimeError("task service is shutting down")
+            self.store.start_task(
+                task, task_id=task_id, async_task=True,
+                owner_instance_id=self.owner_instance_id,
+                group_id=group_id, depends_on=depends_on,
+            )
+            if depends_on:
+                self.store.update_task(task.workspace, task_id, status="queued")
+            self._jobs[task_id] = _Job(task, prepared, task.workspace, cancel_event)
+        self._schedule_ready()
+        return {
+            "task_id": task_id,
+            "status": self.status(task_id)["status"],
+            "workspace": str(task.workspace),
+            "group_id": group_id,
+            "depends_on": list(depends_on),
+        }
+
+    def _schedule_ready(self) -> None:
+        callbacks: list[Future[TaskResult]] = []
+        with self._lock:
+            if self._closed:
+                return
+            changed = True
+            while changed:
+                changed = False
+                for task_id, job in self._jobs.items():
+                    if job.future is not None or job.result is not None:
+                        continue
+                    record = self.store.get_task(job.workspace, task_id)
+                    if not record or record.get("status") in TERMINAL_STATUSES:
+                        continue
+                    dependencies = record.get("depends_on") or []
+                    failed: list[str] = []
+                    waiting = False
+                    for dependency in dependencies:
+                        try:
+                            dep_status = self._resolve(dependency)[1]["status"]
+                        except (OSError, ValueError):
+                            dep_status = "unavailable"
+                        if dep_status != "success":
+                            if dep_status in TERMINAL_STATUSES:
+                                failed.append(dependency)
+                            else:
+                                waiting = True
+                    if failed:
+                        blocked_result = TaskResult(
+                            status="blocked", provider=job.task.provider,
+                            model=job.task.model,
+                            summary="Task dependencies did not succeed.",
+                            error=f"blocked by: {', '.join(failed)}",
+                            metadata={"task_id": task_id, "blocked_by": failed},
+                        )
+                        self.store.update_task(job.workspace, task_id, blocked_by=failed)
+                        self.store.complete_task(job.workspace, task_id, blocked_result)
+                        job.result = blocked_result
+                        changed = True
+                    elif not waiting:
+                        self.store.update_task(job.workspace, task_id, status="routing")
+                        job.future = self.executor.submit(self._run, job.prepared, job.cancel_event)
+                        callbacks.append(job.future)
+                        changed = True
+        for future in callbacks:
+            future.add_done_callback(lambda _: self._schedule_ready())
 
     def _run(self, task: TaskSpec, cancel_event: threading.Event) -> TaskResult:
         task_id = task.metadata["_task_id"]
@@ -125,7 +198,7 @@ class TaskService:
         wait_seconds = min(timeout_seconds, 5.0)
         with self._lock:
             job = self._jobs.get(task_id)
-        if job is not None:
+        if job is not None and job.future is not None:
             try:
                 job.future.result(timeout=wait_seconds)
             except (TimeoutError, CancelledError):
@@ -144,19 +217,29 @@ class TaskService:
             return record
         with self._lock:
             job = self._jobs.get(task_id)
-        if job is None:
-            return {**record, "cancel_status": "owned_elsewhere" if record.get("async") else "owner_unknown"}
-        if job.future.done():
-            return self.status(task_id)
-        job.cancel_event.set()
-        if job.future.cancel():
-            job.result = self._cancelled_result(job.task)
-            self.store.complete_task(workspace, task_id, job.result)
-        else:
-            self.store.update_task(workspace, task_id, current_activity="Cancellation requested")
+            if job is None:
+                return {**record, "cancel_status": "owned_elsewhere" if record.get("async") else "owner_unknown"}
+            if job.future is not None and job.future.done():
+                return self.status(task_id)
+            job.cancel_event.set()
+            future = job.future
+            if future is None:
+                cancelled_result = self._cancelled_result(job.task)
+                self.store.complete_task(workspace, task_id, cancelled_result)
+                job.result = cancelled_result
+        if future is not None:
+            if future.cancel():
+                cancelled_result = self._cancelled_result(job.task)
+                self.store.complete_task(workspace, task_id, cancelled_result)
+                job.result = cancelled_result
+            else:
+                self.store.update_task(workspace, task_id, current_activity="Cancellation requested")
+        self._schedule_ready()
         return self.status(task_id)
 
-    def tasks(self, workspace: Path | None = None) -> list[dict[str, Any]]:
+    def tasks(
+        self, workspace: Path | None = None, *, group_id: str | None = None
+    ) -> list[dict[str, Any]]:
         resolved = workspace.expanduser().resolve() if workspace is not None else None
         records: list[dict[str, Any]] = []
         for task_id in self.store.indexed_task_ids():
@@ -164,9 +247,15 @@ class TaskService:
                 task_workspace, record = self._resolve(task_id)
             except (OSError, ValueError):
                 continue
-            if resolved is None or task_workspace == resolved:
+            if (resolved is None or task_workspace == resolved) and (
+                group_id is None or record.get("group_id") == group_id
+            ):
                 records.append(record)
-        return sorted(records, key=lambda item: str(item.get("started_at", "")), reverse=True)
+        return sorted(
+            records,
+            key=lambda item: (str(item.get("started_at", "")), str(item.get("task_id", ""))),
+            reverse=group_id is None,
+        )
 
     def shutdown(self) -> None:
         with self._lock:

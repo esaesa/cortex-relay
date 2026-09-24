@@ -505,7 +505,7 @@ class RunStore:
         active = sum(item.get("status") in ACTIVE_STATUSES for item in tasks)
         success = sum(item.get("status") == "success" for item in tasks)
         failed = sum(
-            item.get("status") in {"error", "timeout", "unavailable", "cancelled"}
+            item.get("status") in {"error", "timeout", "unavailable", "cancelled", "blocked", "interrupted"}
             for item in tasks
         )
         total_input = 0
@@ -546,11 +546,20 @@ class RunStore:
         removed = 0
         if not directory.exists():
             return 0
+        protected_dependencies = {
+            dependency
+            for active in self._read_many(directory, "*.json")
+            if active.get("status") in ACTIVE_STATUSES
+            for dependency in (active.get("depends_on") or [])
+            if isinstance(dependency, str)
+        }
         for path in directory.glob("*.json"):
             record = self._read_record(path)
             if record and record.get("status") in TERMINAL_STATUSES:
                 task_id = record.get("task_id")
                 if not isinstance(task_id, str) or path != self._task_path(workspace, task_id):
+                    continue
+                if task_id in protected_dependencies:
                     continue
                 try:
                     with self._task_lock(workspace, task_id):
@@ -756,6 +765,12 @@ def render_dashboard(
             details.append(f"worktree {worktree}")
         if details:
             lines.append("  " + " | ".join(details))
+        if verbosity and item.get("depends_on"):
+            lines.append("  Depends on: " + ", ".join(str(value) for value in item["depends_on"]))
+        if item.get("blocked_by"):
+            lines.append("  Blocked by: " + ", ".join(str(value) for value in item["blocked_by"]))
+        if status == "queued":
+            lines.append("  Current: waiting for dependencies")
 
         activity = item.get("current_activity")
         if status in ACTIVE_STATUSES and activity:
@@ -934,6 +949,9 @@ def _status_symbol(status: str) -> str:
         "timeout": "⌛",
         "unavailable": "!",
         "cancelled": "×",
+        "queued": "○",
+        "blocked": "⊘",
+        "interrupted": "!",
     }.get(status, "?")
 
 

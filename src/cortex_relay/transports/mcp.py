@@ -132,6 +132,8 @@ def create_server(
         acceptance_criteria: list[str] | None = None,
         timeout_seconds: int = 300,
         isolate_write: bool = True,
+        group_id: str | None = None,
+        depends_on: list[str] | None = None,
     ) -> dict[str, Any]:
         """Start a delegation and return its task ID immediately."""
         task = _task_from_values(
@@ -141,7 +143,9 @@ def create_server(
             acceptance_criteria=acceptance_criteria or [],
             timeout_seconds=timeout_seconds, isolate_write=isolate_write,
         )
-        return async_tasks.submit(task)
+        return async_tasks.submit(
+            task, group_id=group_id, depends_on=tuple(depends_on or ())
+        )
 
     @server.tool()
     def task_status(task_id: str) -> dict[str, Any]:
@@ -166,9 +170,9 @@ def create_server(
         return async_tasks.cancel(task_id)
 
     @server.tool()
-    def tasks(workspace: str = ".") -> list[dict[str, Any]]:
+    def tasks(workspace: str = ".", group_id: str | None = None) -> list[dict[str, Any]]:
         """List async delegations started by this MCP server for a workspace."""
-        return async_tasks.tasks(Path(workspace))
+        return async_tasks.tasks(Path(workspace), group_id=group_id)
 
     return server
 
