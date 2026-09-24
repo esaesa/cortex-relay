@@ -38,10 +38,10 @@ class AntigravityTests(unittest.TestCase):
         self.assertIn("--disable-slash-commands", command)
         self.assertIn("--add-dir", command)
         add_dir_index = command.index("--add-dir") + 1
-        self.assertEqual(command[add_dir_index], str(workspace))
+        self.assertEqual(Path(command[add_dir_index]).resolve(), task.workspace)
         self.assertIn("--effort", command)
         self.assertIn("--model", command)
-        self.assertIn(f"Workspace: {workspace}", prompt)
+        self.assertIn(f"Workspace: {task.workspace}", prompt)
 
     def test_claude_model_omits_unsupported_effort_flag(self):
         adapter = AntigravityAdapter()
