@@ -97,14 +97,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser(
         "status",
-        help="Show live CortexRelay delegation status for this workspace.",
+        help="Show current and recent CortexRelay delegation status for this workspace.",
     )
     status_parser.add_argument("--workspace", type=Path, default=Path.cwd())
     status_parser.add_argument("--limit", type=int, default=12)
     status_parser.add_argument("--watch", action="store_true")
     status_parser.add_argument("-v", "--verbose", action="count", default=0)
     status_parser.add_argument("--interval", type=float, default=1.0)
-    status_parser.add_argument("--active-only", action="store_true")
+    status_parser.add_argument(
+        "--active-only", action="store_true",
+        help="Show active requests only (also the default for --watch).",
+    )
     status_parser.add_argument("--json", action="store_true", dest="as_json")
     status_parser.add_argument("--clear-completed", action="store_true")
 
@@ -360,7 +363,7 @@ def _status(args: argparse.Namespace, *, completed_only: bool = False) -> int:
         return store.snapshot(
             args.workspace,
             limit=args.limit,
-            active_only=bool(getattr(args, "active_only", False)),
+            active_only=bool(getattr(args, "active_only", False) or getattr(args, "watch", False)),
             completed_only=completed_only,
         )
 
@@ -384,6 +387,7 @@ def _status(args: argparse.Namespace, *, completed_only: bool = False) -> int:
             view = render_dashboard(
                 snapshot(), title="CortexRelay live status",
                 verbosity=getattr(args, "verbose", 0),
+                live_only=True,
             )
             if sys.stdout.isatty():
                 print("\033[2J\033[H", end="")

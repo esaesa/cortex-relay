@@ -162,14 +162,14 @@ cortex-relay status --watch
 CortexRelay live status
 =======================
 Host: muse → opencode/muse/xhigh [RUNNING]
-active 1 | success 2 | failed 0 | tokens 8.4k | cost $0.0063
+active 1 | success 0 | failed 0 | tokens 8.4k | cost $0.0063
 
 ● muse → implementer → worker → opencode/gpt-6-luna/max
   RUNNING     18s  Implement feature X
   worktree .../implementer-...
 ```
 
-The dashboard records the routing path, role, profile, provider, model, reasoning variant, lifecycle status, elapsed time, worktree, tests, changed files, normalized token usage, provider-reported cost when available, result summary, and errors.
+`status --watch` shows active requests and a host session only while its launcher is alive. It hides completed tasks from previous sessions; use `status` or `history` to inspect them. If a launcher exits without recording shutdown, the watcher reports that session as interrupted instead of claiming it is still running. The dashboard records the routing path, role, profile, provider, model, reasoning variant, lifecycle status, elapsed time, worktree, tests, changed files, normalized token usage, provider-reported cost when available, result summary, and errors.
 
 Useful commands:
 

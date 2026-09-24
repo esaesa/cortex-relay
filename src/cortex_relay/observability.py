@@ -37,6 +37,7 @@ class RunStore:
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = (root or _default_state_root()).expanduser().resolve()
+        self._session_locks: dict[str, FileLock] = {}
 
     def start_session(
         self,
@@ -67,7 +68,15 @@ class RunStore:
             "completed_at": None,
             "exit_code": None,
         }
-        self._write_record(self._session_path(workspace, session_id), record)
+        lock_path = self._session_lock_path(workspace, session_id)
+        session_lock = FileLock(lock_path)
+        session_lock.acquire()
+        try:
+            self._write_record(self._session_path(workspace, session_id), record, required=True)
+        except Exception:
+            session_lock.release()
+            raise
+        self._session_locks[str(lock_path)] = session_lock
         return session_id
 
     def end_session(
@@ -91,7 +100,13 @@ class RunStore:
                 "exit_code": exit_code,
             }
         )
-        self._write_record(path, record)
+        try:
+            self._write_record(path, record, required=True)
+        finally:
+            lock_path = self._session_lock_path(workspace, session_id)
+            session_lock = self._session_locks.pop(str(lock_path), None)
+            if session_lock is not None:
+                session_lock.release()
 
     def start_task(
         self,
@@ -507,6 +522,12 @@ class RunStore:
         directory = self._workspace_dir(workspace) / "tasks"
         records = self._read_many(directory, "*.json")
         if active_only:
+            for index, item in enumerate(records):
+                if item.get("async") and item.get("status") in ACTIVE_STATUSES:
+                    try:
+                        records[index] = self.reconcile_task(workspace, str(item["task_id"]))
+                    except (OSError, ValueError, KeyError):
+                        continue
             records = [item for item in records if item.get("status") in ACTIVE_STATUSES]
         if completed_only:
             records = [item for item in records if item.get("status") in TERMINAL_STATUSES]
@@ -526,8 +547,28 @@ class RunStore:
     ) -> list[dict[str, Any]]:
         directory = self._workspace_dir(workspace) / "sessions"
         records = self._read_many(directory, "*.json")
-        records.sort(key=lambda item: str(item.get("started_at", "")), reverse=True)
-        return records[: max(1, limit)]
+        resolved_workspace = _workspace(workspace)
+        observed: list[dict[str, Any]] = []
+        for record in records:
+            if record.get("status") == "running":
+                session_id = record.get("session_id")
+                if isinstance(session_id, str):
+                    lock_path = self._session_lock_path(resolved_workspace, session_id)
+                    if (str(lock_path) not in self._session_locks
+                            and not lock_is_held(lock_path)):
+                        # Re-read after the lease probe so a graceful shutdown that
+                        # raced this snapshot keeps its recorded terminal status.
+                        latest = self._read_record(self._session_path(resolved_workspace, session_id))
+                        record = latest or record
+                        if record.get("status") == "running":
+                            record = {
+                                **record,
+                                "status": "interrupted",
+                                "owner_unavailable": True,
+                            }
+            observed.append(record)
+        observed.sort(key=lambda item: str(item.get("started_at", "")), reverse=True)
+        return observed[: max(1, limit)]
 
     def snapshot(
         self,
@@ -572,6 +613,7 @@ class RunStore:
             "state_directory": str(self._workspace_dir(workspace)),
             "sessions": sessions,
             "tasks": tasks,
+            "active_only": active_only,
             "summary": {
                 "active": active,
                 "success": success,
@@ -643,6 +685,9 @@ class RunStore:
 
     def _session_path(self, workspace: Path, session_id: str) -> Path:
         return self._workspace_dir(workspace) / "sessions" / f"{_safe_id(session_id)}.json"
+
+    def _session_lock_path(self, workspace: Path, session_id: str) -> Path:
+        return self._workspace_dir(workspace) / "sessions" / f"{_safe_id(session_id)}.lock"
 
     def _write_record(self, path: Path, record: dict[str, Any], *, required: bool = False) -> None:
         try:
@@ -728,15 +773,15 @@ def render_dashboard(
     title: str = "CortexRelay status",
     completed_only: bool = False,
     verbosity: int = 0,
+    live_only: bool = False,
 ) -> str:
     lines: list[str] = [title, "=" * len(title)]
     lines.append(f"Workspace: {snapshot.get('workspace', '')}")
 
     sessions = snapshot.get("sessions") or []
-    active_session = next(
-        (item for item in sessions if item.get("status") == "running"),
-        sessions[0] if sessions else None,
-    )
+    active_session = next((item for item in sessions if item.get("status") == "running"), None)
+    if active_session is None and sessions and not live_only:
+        active_session = sessions[0]
     if active_session:
         host = _compact_model(
             active_session.get("provider"),
@@ -748,6 +793,8 @@ def render_dashboard(
             f"{active_session.get('profile') or 'orchestrator'} → {host} "
             f"[{str(active_session.get('status', '')).upper()}]"
         )
+    elif live_only:
+        lines.append("Host: none active")
 
     summary = snapshot.get("summary") or {}
     totals = [
@@ -766,7 +813,12 @@ def render_dashboard(
 
     tasks = snapshot.get("tasks") or []
     if not tasks:
-        lines.append("No completed tasks." if completed_only else "No CortexRelay tasks recorded yet.")
+        if completed_only:
+            lines.append("No completed tasks.")
+        elif snapshot.get("active_only"):
+            lines.append("No active CortexRelay requests. Watching for new requests.")
+        else:
+            lines.append("No CortexRelay tasks recorded yet.")
         return "\n".join(lines)
 
     now = time.time()
