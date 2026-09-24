@@ -82,7 +82,7 @@ cortex-relay launch
 
 ### 1. First time: `cortex-relay setup`
 
-The setup wizard detects installed runtime providers, discovers OpenCode models and variants when available, asks which provider/model should be the orchestrator and default worker, then lets you assign profiles to each role:
+The setup wizard detects installed runtime providers, discovers OpenCode models/variants and Antigravity models when available, asks which provider/model should be the orchestrator and default worker, then lets you assign profiles to each role:
 
 ```text
 orchestrator
@@ -130,6 +130,7 @@ The advanced commands remain available when you need explicit control:
 ```bash
 cortex-relay profiles
 cortex-relay models --provider opencode --refresh
+cortex-relay models --provider antigravity
 cortex-relay delegate --profile <name> "task"
 cortex-relay launch --preset <name>
 ```

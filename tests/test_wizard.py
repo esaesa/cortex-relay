@@ -8,6 +8,7 @@ from unittest.mock import patch
 from cortex_relay.wizard import (
     ProviderCatalog,
     WizardIO,
+    discover_catalogs,
     render_toml,
     run_config_editor,
     run_setup,
@@ -28,6 +29,45 @@ class ScriptedIO(WizardIO):
 
 
 class WizardTests(unittest.TestCase):
+    def test_discover_catalogs_uses_live_antigravity_models(self):
+        class FakeRegistry:
+            def capabilities(self):
+                return [
+                    {
+                        "name": "antigravity",
+                        "available": True,
+                        "known_models": (),
+                        "reasoning_levels": ("low", "medium", "high"),
+                    }
+                ]
+
+        class FakeAntigravity:
+            def discover_models(self):
+                return {
+                    "gemini-3.8-flash-high": {
+                        "label": "Gemini 3.8 Flash (High)"
+                    },
+                    "claude-sonnet-4-6": {
+                        "label": "Claude Sonnet 4.6 (Thinking)"
+                    },
+                }
+
+        with patch(
+            "cortex_relay.providers.antigravity.AntigravityAdapter",
+            return_value=FakeAntigravity(),
+        ):
+            catalogs = discover_catalogs(FakeRegistry())
+
+        self.assertIn("antigravity", catalogs)
+        self.assertIn(
+            "gemini-3.8-flash-high",
+            catalogs["antigravity"].models,
+        )
+        self.assertEqual(
+            catalogs["antigravity"].reasoning_levels,
+            ("low", "medium", "high"),
+        )
+
     def test_render_toml_round_trips_nested_runtime_config(self):
         data = {
             "active_preset": "default",

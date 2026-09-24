@@ -316,6 +316,8 @@ Discover the model IDs exposed by the installed OpenCode/provider configuration:
 cortex-relay models --provider opencode --refresh
 cortex-relay models --provider opencode --refresh --verbose
 cortex-relay models --provider opencode --refresh --json
+cortex-relay models --provider antigravity
+cortex-relay models --provider antigravity --json
 ```
 
 OpenCode variant validation is best-effort. When verbose model metadata explicitly lists variants, CortexRelay rejects a requested variant that is absent. When metadata is unavailable or does not advertise variants, the value is passed through.
@@ -350,6 +352,8 @@ These are hints, not an allowlist. Unknown future model IDs and reasoning names 
 Read-only Codex tasks also compare git status before and after execution. Write-capable tasks inherit the same provider-neutral worktree isolation used by other adapters.
 
 ## Antigravity adapter
+
+CortexRelay discovers the live Antigravity model catalog through `agy models`. The command currently returns a human-readable list rather than JSON, so CortexRelay parses the model slug and display label conservatively and falls back to manual model entry only if discovery returns no usable models.
 
 The adapter uses headless `agy -p` execution with:
 

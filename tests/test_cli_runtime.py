@@ -88,6 +88,25 @@ class FakeOpenCodeAdapter:
         }
 
 
+class FakeAntigravityAdapter:
+    def capabilities(self):
+        class Capabilities:
+            available = True
+            detail = "fake"
+
+        return Capabilities()
+
+    def discover_models(self):
+        return {
+            "gemini-3.8-flash-high": {
+                "label": "Gemini 3.8 Flash (High)"
+            },
+            "claude-sonnet-4-6": {
+                "label": "Claude Sonnet 4.6 (Thinking)"
+            },
+        }
+
+
 class CLIRuntimeTests(unittest.TestCase):
     def test_setup_command_dispatches_to_wizard(self):
         output_path = __import__("pathlib").Path("/tmp/config.toml")
@@ -247,6 +266,19 @@ class CLIRuntimeTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("opencode/muse", output.getvalue())
         self.assertIn("opencode/gpt-6-luna", output.getvalue())
+
+    def test_models_command_uses_antigravity_discovery(self):
+        output = io.StringIO()
+        with patch(
+            "cortex_relay.providers.antigravity.AntigravityAdapter",
+            return_value=FakeAntigravityAdapter(),
+        ):
+            with redirect_stdout(output):
+                code = main(["models", "--provider", "antigravity"])
+        self.assertEqual(code, 0)
+        self.assertIn("Antigravity models:", output.getvalue())
+        self.assertIn("gemini-3.8-flash-high", output.getvalue())
+        self.assertIn("Gemini 3.8 Flash (High)", output.getvalue())
 
     @patch("cortex_relay.transports.a2a.run_a2a")
     def test_serve_a2a_builds_server_profile_policy(self, run_a2a):

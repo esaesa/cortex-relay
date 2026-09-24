@@ -197,6 +197,18 @@ def discover_catalogs(
                 reasoning_levels=(),
             )
 
+    if "antigravity" in capabilities:
+        from cortex_relay.providers.antigravity import AntigravityAdapter
+
+        adapter = AntigravityAdapter()
+        discovered = adapter.discover_models()
+        if discovered:
+            catalogs["antigravity"] = ProviderCatalog(
+                name="antigravity",
+                models=discovered,
+                reasoning_levels=("low", "medium", "high"),
+            )
+
     return catalogs
 
 
