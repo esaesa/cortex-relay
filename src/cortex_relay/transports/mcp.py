@@ -6,13 +6,14 @@ from typing import Any
 
 from cortex_relay.core.models import QualityGates, TaskBudget, TaskSpec
 from cortex_relay.core.registry import ProviderRegistry, default_registry
+from cortex_relay.runtime.task_protocol import TaskControl
 from cortex_relay.runtime.task_service import TaskService
 
 
 def create_server(
     registry: ProviderRegistry | None = None,
     *,
-    async_tasks: TaskService | None = None,
+    async_tasks: TaskControl | None = None,
 ) -> Any:
     """Create the optional MCP v2 server without importing MCP at package import time."""
 
