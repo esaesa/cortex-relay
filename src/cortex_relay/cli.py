@@ -71,12 +71,37 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("providers", help="List runtime providers and capabilities.")
 
+    profiles_parser = subparsers.add_parser(
+        "profiles",
+        help="Show merged execution profiles, presets, and role assignments.",
+    )
+    profiles_parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    profiles_parser.add_argument("--preset")
+    profiles_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    models_parser = subparsers.add_parser(
+        "models",
+        help="Discover models exposed by a runtime provider.",
+    )
+    models_parser.add_argument("--provider", choices=("opencode",), default="opencode")
+    models_parser.add_argument("--refresh", action="store_true")
+    models_parser.add_argument("--verbose", action="store_true")
+    models_parser.add_argument("--json", action="store_true", dest="as_json")
+
     delegate_parser = subparsers.add_parser(
         "delegate",
         help="Delegate one bounded task through the provider-neutral runtime.",
     )
     delegate_parser.add_argument("objective")
     delegate_parser.add_argument("--role", default="reviewer")
+    delegate_parser.add_argument(
+        "--profile",
+        help="Named execution profile. Overrides the configured role mapping.",
+    )
+    delegate_parser.add_argument(
+        "--preset",
+        help="Runtime preset used for role-to-profile mapping.",
+    )
     delegate_parser.add_argument("--provider", default="auto")
     delegate_parser.add_argument("--workspace", type=Path, default=Path.cwd())
     delegate_parser.add_argument("--access", choices=RUNTIME_ACCESS, default="read_only")
@@ -114,6 +139,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8765)
+    serve_parser.add_argument("--a2a-profile")
+    serve_parser.add_argument("--a2a-preset")
     serve_parser.add_argument("--a2a-provider", default="auto")
     serve_parser.add_argument("--a2a-model")
     serve_parser.add_argument("--a2a-reasoning", default="high")
@@ -186,10 +213,78 @@ def _providers() -> int:
     return 0
 
 
+def _profiles(args: argparse.Namespace) -> int:
+    registry = default_registry()
+    try:
+        data = registry.profile_config(args.workspace, preset=args.preset)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    if args.as_json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
+
+    sources = data.get("sources") or []
+    print("CortexRelay execution profiles:")
+    print(f"  sources: {', '.join(sources) if sources else '(built-in legacy routing only)'}")
+    print(f"  preset:  {data.get('active_preset') or '(none)'}")
+    roles = data.get("roles") or {}
+    if roles:
+        print("  roles:")
+        for role, profile in sorted(roles.items()):
+            print(f"    {role}: {profile}")
+    profiles = data.get("profiles") or {}
+    if profiles:
+        print("  profiles:")
+        for name, profile in sorted(profiles.items()):
+            model = profile.get("model") or "(provider default)"
+            billing = profile.get("billing_class") or "unspecified"
+            print(
+                f"    {name}: {profile['provider']} / {model} / "
+                f"{profile['reasoning']} [{billing}]"
+            )
+            fallbacks = profile.get("fallbacks") or []
+            if fallbacks:
+                print(f"      fallbacks: {', '.join(fallbacks)}")
+    return 0
+
+
+def _models(args: argparse.Namespace) -> int:
+    if args.provider != "opencode":
+        print(f"unsupported model discovery provider: {args.provider}", file=sys.stderr)
+        return 2
+
+    from .providers.opencode import OpenCodeAdapter
+
+    adapter = OpenCodeAdapter()
+    if not adapter.capabilities().available:
+        print(adapter.capabilities().detail, file=sys.stderr)
+        return 1
+
+    models = adapter.discover_models(
+        refresh=args.refresh,
+        verbose=args.verbose or args.as_json,
+    )
+    if not models:
+        print("No OpenCode models were discovered.", file=sys.stderr)
+        return 1
+
+    if args.as_json:
+        print(json.dumps(models, indent=2, ensure_ascii=False))
+    else:
+        print("OpenCode models:")
+        for model_id in sorted(models):
+            print(f"  {model_id}")
+    return 0
+
+
 def _delegate(args: argparse.Namespace) -> int:
     task = TaskSpec(
         objective=args.objective,
         role=args.role,
+        profile=args.profile,
+        preset=args.preset,
         provider=args.provider,
         workspace=args.workspace,
         access=args.access,
@@ -256,6 +351,8 @@ def _serve(args: argparse.Namespace) -> int:
 
         try:
             policy = A2AServerPolicy(
+                profile=args.a2a_profile,
+                preset=args.a2a_preset,
                 provider=args.a2a_provider,
                 model=args.a2a_model,
                 reasoning=args.a2a_reasoning,
@@ -395,6 +492,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "providers":
         return _providers()
+    if args.command == "profiles":
+        return _profiles(args)
+    if args.command == "models":
+        return _models(args)
     if args.command == "delegate":
         return _delegate(args)
     if args.command == "serve":
