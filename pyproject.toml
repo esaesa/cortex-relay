@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortex-relay"
-version = "0.5.0"
+version = "0.6.0"
 description = "Provider-neutral delegation runtime and cost-aware multi-agent configuration for coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ license = "Apache-2.0"
 authors = [
   { name = "CortexRelay contributors" }
 ]
-keywords = ["codex", "gemini", "antigravity", "mcp", "a2a", "multi-agent", "subagents", "orchestration", "model-routing", "reasoning-routing"]
+keywords = ["codex", "gemini", "opencode", "zen", "antigravity", "mcp", "a2a", "multi-agent", "subagents", "orchestration", "model-routing", "reasoning-routing"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",

@@ -33,9 +33,16 @@ def create_server(registry: ProviderRegistry | None = None) -> Any:
         return runtime.capabilities()
 
     @server.tool()
+    def profiles(workspace: str = ".", preset: str | None = None) -> dict[str, Any]:
+        """Show merged execution profiles and effective role assignments."""
+        return runtime.profile_config(Path(workspace), preset=preset)
+
+    @server.tool()
     def delegate(
         objective: str,
         role: str = "reviewer",
+        profile: str | None = None,
+        preset: str | None = None,
         provider: str = "auto",
         workspace: str = ".",
         access: str = "read_only",
@@ -49,6 +56,8 @@ def create_server(registry: ProviderRegistry | None = None) -> Any:
         task = _task_from_values(
             objective=objective,
             role=role,
+            profile=profile,
+            preset=preset,
             provider=provider,
             workspace=workspace,
             access=access,
@@ -97,6 +106,8 @@ def _task_from_mapping(data: dict[str, Any]) -> TaskSpec:
     return _task_from_values(
         objective=str(data.get("objective", "")),
         role=str(data.get("role", "reviewer")),
+        profile=data.get("profile") if isinstance(data.get("profile"), str) else None,
+        preset=data.get("preset") if isinstance(data.get("preset"), str) else None,
         provider=str(data.get("provider", "auto")),
         workspace=str(data.get("workspace", ".")),
         access=str(data.get("access", "read_only")),
@@ -116,6 +127,8 @@ def _task_from_values(
     *,
     objective: str,
     role: str,
+    profile: str | None,
+    preset: str | None,
     provider: str,
     workspace: str,
     access: str,
@@ -130,6 +143,8 @@ def _task_from_values(
     return TaskSpec(
         objective=objective,
         role=role,
+        profile=profile,
+        preset=preset,
         provider=provider,
         workspace=Path(workspace),
         access=access,  # type: ignore[arg-type]

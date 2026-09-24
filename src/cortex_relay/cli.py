@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -71,12 +72,47 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("providers", help="List runtime providers and capabilities.")
 
+    profiles_parser = subparsers.add_parser(
+        "profiles",
+        help="Show merged execution profiles, presets, and role assignments.",
+    )
+    profiles_parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    profiles_parser.add_argument("--preset")
+    profiles_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    models_parser = subparsers.add_parser(
+        "models",
+        help="Discover models exposed by a runtime provider.",
+    )
+    models_parser.add_argument("--provider", choices=("opencode",), default="opencode")
+    models_parser.add_argument("--refresh", action="store_true")
+    models_parser.add_argument("--verbose", action="store_true")
+    models_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    launch_parser = subparsers.add_parser(
+        "launch",
+        help="Launch an interactive host agent from a configured orchestrator profile.",
+    )
+    launch_parser.add_argument("--role", default="orchestrator")
+    launch_parser.add_argument("--profile")
+    launch_parser.add_argument("--preset")
+    launch_parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    launch_parser.add_argument("--prompt")
+
     delegate_parser = subparsers.add_parser(
         "delegate",
         help="Delegate one bounded task through the provider-neutral runtime.",
     )
     delegate_parser.add_argument("objective")
     delegate_parser.add_argument("--role", default="reviewer")
+    delegate_parser.add_argument(
+        "--profile",
+        help="Named execution profile. Overrides the configured role mapping.",
+    )
+    delegate_parser.add_argument(
+        "--preset",
+        help="Runtime preset used for role-to-profile mapping.",
+    )
     delegate_parser.add_argument("--provider", default="auto")
     delegate_parser.add_argument("--workspace", type=Path, default=Path.cwd())
     delegate_parser.add_argument("--access", choices=RUNTIME_ACCESS, default="read_only")
@@ -114,6 +150,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8765)
+    serve_parser.add_argument("--a2a-profile")
+    serve_parser.add_argument("--a2a-preset")
     serve_parser.add_argument("--a2a-provider", default="auto")
     serve_parser.add_argument("--a2a-model")
     serve_parser.add_argument("--a2a-reasoning", default="high")
@@ -186,10 +224,146 @@ def _providers() -> int:
     return 0
 
 
+def _profiles(args: argparse.Namespace) -> int:
+    registry = default_registry()
+    try:
+        data = registry.profile_config(args.workspace, preset=args.preset)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    if args.as_json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
+
+    sources = data.get("sources") or []
+    print("CortexRelay execution profiles:")
+    print(f"  sources: {', '.join(sources) if sources else '(built-in legacy routing only)'}")
+    print(f"  preset:  {data.get('active_preset') or '(none)'}")
+    roles = data.get("roles") or {}
+    if roles:
+        print("  roles:")
+        for role, profile in sorted(roles.items()):
+            print(f"    {role}: {profile}")
+    profiles = data.get("profiles") or {}
+    if profiles:
+        print("  profiles:")
+        for name, profile in sorted(profiles.items()):
+            model = profile.get("model") or "(provider default)"
+            billing = profile.get("billing_class") or "unspecified"
+            print(
+                f"    {name}: {profile['provider']} / {model} / "
+                f"{profile['reasoning']} [{billing}]"
+            )
+            fallbacks = profile.get("fallbacks") or []
+            if fallbacks:
+                print(f"      fallbacks: {', '.join(fallbacks)}")
+    return 0
+
+
+def _models(args: argparse.Namespace) -> int:
+    if args.provider != "opencode":
+        print(f"unsupported model discovery provider: {args.provider}", file=sys.stderr)
+        return 2
+
+    from .providers.opencode import OpenCodeAdapter
+
+    adapter = OpenCodeAdapter()
+    if not adapter.capabilities().available:
+        print(adapter.capabilities().detail, file=sys.stderr)
+        return 1
+
+    models = adapter.discover_models(
+        refresh=args.refresh,
+        verbose=args.verbose or args.as_json,
+    )
+    if not models:
+        print("No OpenCode models were discovered.", file=sys.stderr)
+        return 1
+
+    if args.as_json:
+        print(json.dumps(models, indent=2, ensure_ascii=False))
+    else:
+        print("OpenCode models:")
+        for model_id in sorted(models):
+            print(f"  {model_id}")
+    return 0
+
+
+def _launch(args: argparse.Namespace) -> int:
+    if importlib.util.find_spec("mcp") is None:
+        print(
+            'Interactive orchestrator launch requires MCP support. Install with: '
+            'pip install "cortex-relay[mcp]"',
+            file=sys.stderr,
+        )
+        return 2
+
+    registry = default_registry()
+    try:
+        config = registry.profiles.load(args.workspace)
+        selector = TaskSpec(
+            objective="Launch interactive CortexRelay orchestrator",
+            role=args.role,
+            profile=args.profile,
+            preset=args.preset,
+            workspace=args.workspace,
+        )
+        profile = config.profile_for_task(selector)
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    if profile is None:
+        print(
+            f"No execution profile is configured for role {args.role!r}. "
+            "Set --profile or configure the role in .cortex-relay/config.toml.",
+            file=sys.stderr,
+        )
+        return 2
+    if profile.provider != "opencode":
+        print(
+            "Interactive host launch currently supports OpenCode profiles. "
+            f"Selected profile {profile.name!r} uses provider {profile.provider!r}.",
+            file=sys.stderr,
+        )
+        return 2
+
+    from .providers.opencode import OpenCodeAdapter
+
+    metadata = {
+        "profile_options": dict(profile.options),
+        "billing_class": profile.billing_class,
+    }
+    if args.prompt:
+        metadata["host_prompt"] = args.prompt
+
+    host_task = TaskSpec(
+        objective="Interactive CortexRelay orchestration session",
+        role=args.role,
+        profile=profile.name,
+        preset=args.preset,
+        provider=profile.provider,
+        workspace=args.workspace,
+        access=profile.access,
+        reasoning=profile.reasoning,
+        model=profile.model,
+        metadata=metadata,
+    )
+    adapter = OpenCodeAdapter()
+    try:
+        return adapter.launch_host(host_task)
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+
 def _delegate(args: argparse.Namespace) -> int:
     task = TaskSpec(
         objective=args.objective,
         role=args.role,
+        profile=args.profile,
+        preset=args.preset,
         provider=args.provider,
         workspace=args.workspace,
         access=args.access,
@@ -256,6 +430,8 @@ def _serve(args: argparse.Namespace) -> int:
 
         try:
             policy = A2AServerPolicy(
+                profile=args.a2a_profile,
+                preset=args.a2a_preset,
                 provider=args.a2a_provider,
                 model=args.a2a_model,
                 reasoning=args.a2a_reasoning,
@@ -395,6 +571,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "providers":
         return _providers()
+    if args.command == "profiles":
+        return _profiles(args)
+    if args.command == "models":
+        return _models(args)
+    if args.command == "launch":
+        return _launch(args)
     if args.command == "delegate":
         return _delegate(args)
     if args.command == "serve":
