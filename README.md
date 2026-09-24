@@ -2,7 +2,7 @@
 
 **Provider-neutral coding-agent delegation plus cost-aware orchestration configuration for Codex and Gemini CLI.**
 
-CortexRelay is an open-source delegation runtime and configuration toolkit. It lets a primary coding agent keep ownership of planning and final synthesis while delegating bounded work through a common task/result contract to external providers such as Antigravity CLI and OpenAI Codex CLI.
+CortexRelay is an open-source delegation runtime and configuration toolkit. It lets a primary coding agent keep ownership of planning and final synthesis while delegating bounded work through a common task/result contract to external providers such as OpenCode, Antigravity CLI, and OpenAI Codex CLI.
 
 It supports two provider backends today:
 
@@ -72,7 +72,7 @@ cortex-relay --version
 
 ## Runtime delegation
 
-Version 0.5 supports Antigravity CLI and OpenAI Codex CLI as provider-neutral runtime workers, exposed through direct CLI delegation, MCP, and an A2A server for remote agents such as Gemini CLI.
+Version 0.6 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI as provider-neutral runtime workers, exposed through direct CLI delegation, MCP, and an A2A server for remote agents such as Gemini CLI.
 
 ```text
 Primary coding agent
@@ -86,11 +86,11 @@ Primary coding agent
         +--> provider adapter
                   |
                   v
-        +---------+---------+
-        |                   |
-  Antigravity CLI       Codex CLI
-        |                   |
-        +---------+---------+
+        +---------+---------+---------+
+        |                   |         |
+    OpenCode         Antigravity   Codex CLI
+        |                   |         |
+        +---------+---------+---------+
                   v
           normalized result
 ```
@@ -130,9 +130,101 @@ python -m pip install -e ".[mcp]"
 cortex-relay serve --transport mcp
 ```
 
-The MCP surface is intentionally small: `providers`, `delegate`, and `delegate_parallel`. Codex and Antigravity are both available through the same tools when their CLIs are installed.
+The MCP surface is intentionally small: `providers`, `profiles`, `delegate`, and `delegate_parallel`. OpenCode, Codex, and Antigravity are available through the same tools when their CLIs are installed.
 
 See [Runtime delegation](docs/runtime.md) and [Architecture](docs/architecture.md) for the shared MCP/A2A runtime design.
+
+## Dynamic execution profiles
+
+Version 0.6 separates **roles** from **execution resources**. A named profile defines one provider/model/reasoning/billing path; roles and presets only point to profile names. This means the same model can be represented separately through OpenCode Zen and Codex without CortexRelay treating them as the same resource.
+
+CortexRelay merges:
+
+```text
+~/.cortex-relay/config.toml
+        ↓
+.cortex-relay/config.toml
+        ↓
+project values override user defaults
+```
+
+Example project configuration:
+
+```toml
+active_preset = "zen-default"
+
+[profiles.muse-orchestrator]
+provider = "opencode"
+model = "opencode/muse-spark-1.3-contributor-free"
+reasoning = "xhigh"
+access = "read_only"
+billing_class = "zen-free"
+
+[profiles.zen-luna]
+provider = "opencode"
+model = "opencode/gpt-6-luna"
+reasoning = "max"
+access = "workspace_write"
+billing_class = "zen-cheap"
+fallbacks = ["codex-luna"]
+
+[profiles.zen-luna.options]
+validate_variant = true
+
+[profiles.codex-luna]
+provider = "codex"
+model = "gpt-6-luna"
+reasoning = "max"
+access = "workspace_write"
+billing_class = "chatgpt"
+
+[roles]
+orchestrator = "muse-orchestrator"
+explorer = "zen-luna"
+architect = "muse-orchestrator"
+implementer = "zen-luna"
+tester = "zen-luna"
+reviewer = "zen-luna"
+
+[presets.premium-review.roles]
+reviewer = "codex-luna"
+```
+
+The model IDs above are examples. Discover the IDs actually exposed by the installed OpenCode/provider configuration:
+
+```bash
+cortex-relay models --provider opencode --refresh
+cortex-relay models --provider opencode --refresh --verbose
+```
+
+Inspect the merged routing policy:
+
+```bash
+cortex-relay profiles
+cortex-relay profiles --preset premium-review
+```
+
+Use the configured role mapping:
+
+```bash
+cortex-relay delegate --role implementer --access workspace_write "Implement the bounded change"
+```
+
+Or override one task without changing configuration:
+
+```bash
+cortex-relay delegate --profile codex-luna "Review this change"
+```
+
+Resolution is deterministic: explicit `--profile`, then the selected preset/role mapping, then the legacy provider routing behavior. Explicit `--provider` and `--model` continue to work for backward compatibility.
+
+Profile fallbacks default to `unavailable` only. A user may opt into fallback on `timeout` or `error`, but doing so for write-capable profiles can leave separate isolated worktrees from failed attempts that need inspection.
+
+### OpenCode worker safety
+
+CortexRelay launches delegated OpenCode workers non-interactively with a CortexRelay-owned permission overlay. It does not enable broad auto-approval. Read-only profiles deny edits; write profiles can edit only within the active workspace/worktree policy; external directories, native subagent delegation, skills, and web tools are denied by the injected worker policy. Shell commands default to approval-required, with a narrow allowlist for repository inspection and common test/build commands.
+
+OpenCode model variants are validated when the installed OpenCode model metadata explicitly advertises them. If metadata is unavailable, CortexRelay passes the requested variant through rather than imposing a stale allowlist.
 
 ## A2A: let Gemini CLI delegate through CortexRelay
 
@@ -147,9 +239,7 @@ Start a local Codex-backed remote agent:
 ```bash
 cortex-relay serve \
   --transport a2a \
-  --a2a-provider codex \
-  --a2a-model gpt-6-luna \
-  --a2a-reasoning max \
+  --a2a-profile zen-luna \
   --a2a-role reviewer \
   --a2a-workspace .
 ```
@@ -171,7 +261,7 @@ The local server exposes:
 
 The server targets A2A v1 and enables v0.3 compatibility on its JSON-RPC and REST endpoints, which matches current Gemini CLI remote-agent behavior.
 
-A2A policy is fixed when the server starts. Incoming agents send only the task text; they cannot choose another workspace, provider, model, or write permission through the prompt. Read-only is the default. Workspace-write tasks can use isolated git worktrees.
+A2A policy is fixed when the server starts. It may select an explicit profile (`--a2a-profile`) or a preset plus role (`--a2a-preset`). Incoming agents send only the task text; they cannot choose another workspace, profile, provider, model, or write permission through the prompt. Read-only is the default. Workspace-write tasks can use isolated git worktrees.
 
 For safety, CortexRelay refuses non-loopback A2A binding unless `--a2a-allow-remote` is explicitly supplied. That flag exposes an unauthenticated service, so local binding is the recommended default.
 
@@ -324,12 +414,12 @@ Worker reports should contain the smallest evidence needed for the primary agent
 
 ## Safety and limitations
 
-- CortexRelay can both generate Codex/Gemini configuration and invoke registered Codex or Antigravity provider CLIs for delegated tasks. It does not proxy or intercept provider API traffic.
+- CortexRelay can generate Codex/Gemini configuration and invoke registered OpenCode, Codex, or Antigravity provider CLIs for delegated tasks. It does not proxy or intercept provider API traffic.
 - Model availability depends on your account, workspace policy, authentication method, product surface, and rollout status.
 - Current Codex compatibility hints include `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`, but runtime model IDs are passed through rather than restricted to a fixed allowlist. Model availability still depends on the installed Codex version and account.
 - Lower reasoning is appropriate for bounded/mechanical tasks, not automatically for every worker.
 - Do not grant a delegated provider broader tool access than its task requires. CortexRelay does not pass Antigravity's global auto-approval flag or Codex's dangerous sandbox/approval bypass flag.
-- Gemini project settings are ignored in untrusted workspaces; trust the workspace before expecting `.gemini/settings.json` or project remote-agent files to load.\n- The A2A server is unauthenticated in 0.5; keep it on loopback unless you explicitly accept remote network exposure.
+- Gemini project settings are ignored in untrusted workspaces; trust the workspace before expecting `.gemini/settings.json` or project remote-agent files to load.\n- The A2A server is unauthenticated in 0.6; keep it on loopback unless you explicitly accept remote network exposure.
 
 ## Official references
 
@@ -338,6 +428,12 @@ Worker reports should contain the smallest evidence needed for the primary agent
 - Codex subagents: https://learn.chatgpt.com/docs/agent-configuration/subagents
 - Codex `AGENTS.md`: https://learn.chatgpt.com/docs/agent-configuration/agents-md
 - Codex config reference: https://learn.chatgpt.com/docs/config-file/config-reference
+
+### OpenCode
+
+- OpenCode CLI: https://dev.opencode.ai/docs/cli/
+- OpenCode configuration: https://dev.opencode.ai/docs/config/
+- OpenCode permissions: https://dev.opencode.ai/docs/permissions/
 
 ### Gemini CLI
 
