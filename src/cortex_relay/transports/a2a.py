@@ -6,7 +6,7 @@ import ipaddress
 import json
 import re
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -73,7 +73,7 @@ class A2AServerPolicy:
     model: str | None = None
     reasoning: str = "high"
     role: str = "reviewer"
-    workspace: Path = Path.cwd()
+    workspace: Path = field(default_factory=Path.cwd)
     access: TaskAccess = "read_only"
     timeout_seconds: int = 300
     isolate_write: bool = True
