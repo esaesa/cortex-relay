@@ -4,7 +4,9 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import time
+import textwrap
 
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -140,7 +142,7 @@ class RunStore:
             "host_reasoning": session.get("host_reasoning"),
             "workspace": str(_workspace(task.workspace)),
             "role": task.role,
-            "objective": _truncate(task.objective, 280),
+            "objective": task.objective,
             "status": "routing",
             "profile": task.profile,
             "preset": task.preset,
@@ -834,7 +836,22 @@ def render_dashboard(
             f"{_compact_model(item.get('provider'), item.get('model'), item.get('reasoning'))}"
         )
         lines.append(f"{symbol} {route}")
-        lines.append(f"  {status.upper():<11} {elapsed}  {_truncate(str(item.get('objective') or ''), 96)}")
+        objective = str(item.get("objective") or "").strip()
+        status_prefix = f"  {status.upper():<11} {elapsed}  "
+        if objective:
+            terminal_width = shutil.get_terminal_size((100, 24)).columns
+            lines.extend(
+                textwrap.wrap(
+                    objective,
+                    width=max(terminal_width, len(status_prefix) + 24),
+                    initial_indent=status_prefix,
+                    subsequent_indent=" " * len(status_prefix),
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                )
+            )
+        else:
+            lines.append(status_prefix.rstrip())
 
         details: list[str] = []
         usage = item.get("usage_summary")
