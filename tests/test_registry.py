@@ -7,6 +7,7 @@ from cortex_relay.core.models import TaskResult, TaskSpec
 from cortex_relay.core.profiles import runtime_config_from_mapping
 from cortex_relay.core.registry import ProviderRegistry, default_registry
 from cortex_relay.providers.base import ProviderAdapter, ProviderCapabilities
+from cortex_relay.observability import RunStore
 
 
 class FakeProvider(ProviderAdapter):
@@ -212,6 +213,36 @@ class RegistryTests(unittest.TestCase):
 
         self.assertEqual(result.status, "error")
         self.assertIn("does not permit workspace writes", result.summary)
+
+    def test_execute_records_observability_and_returns_task_id(self):
+        provider = FakeProvider()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "repo"
+            state = Path(tmp) / "state"
+            workspace.mkdir()
+            registry = ProviderRegistry(
+                [provider],
+                profiles=StaticResolver({}),
+                run_store=RunStore(state),
+            )
+            result = registry.execute(
+                TaskSpec(
+                    objective="Inspect repository",
+                    provider="fake",
+                    workspace=workspace,
+                )
+            )
+            snapshot = registry.status_snapshot(workspace)
+
+        self.assertTrue(result.ok)
+        self.assertIn("task_id", result.metadata)
+        self.assertIn("observability", result.metadata)
+        self.assertEqual(len(snapshot["tasks"]), 1)
+        self.assertEqual(snapshot["tasks"][0]["status"], "success")
+        self.assertEqual(
+            snapshot["tasks"][0]["task_id"],
+            result.metadata["task_id"],
+        )
 
     def test_explicit_provider_bypasses_role_profile(self):
         opencode = FakeProvider("opencode")
