@@ -535,7 +535,13 @@ def _elapsed(item: dict[str, Any], now_epoch: float) -> str:
     if isinstance(started, str):
         try:
             start = datetime.fromisoformat(started).timestamp()
-            return _format_duration(max(0.0, now_epoch - start))
+            end = now_epoch
+            if item.get("status") in TERMINAL_STATUSES:
+                completed = item.get("completed_at") or item.get("updated_at")
+                if not isinstance(completed, str):
+                    return "--"
+                end = datetime.fromisoformat(completed).timestamp()
+            return _format_duration(max(0.0, end - start))
         except ValueError:
             pass
     return "--"
