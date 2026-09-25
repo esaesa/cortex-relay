@@ -929,6 +929,8 @@ def _normalize_state(value: str) -> str:
         return lowered
     if lowered in {"done", "success", "completed"}:
         return "idle"
-    if lowered in {"error", "cancelled", "canceled"}:
+    if lowered in {"cancelled", "canceled"}:
+        return "interrupted"
+    if lowered == "error":
         return "failed"
     return "running"
