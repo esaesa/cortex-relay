@@ -20,19 +20,24 @@ class OpenCodeHostLaunchTests(unittest.TestCase):
                 json.dumps({"variant": {"opencode/muse": "xhigh"}}),
                 encoding="utf-8",
             )
+            control_state = Path(user_state_home) / "cortex-control"
             task = TaskSpec(
                 objective="Orchestrate",
                 provider="opencode",
                 model="opencode/muse",
                 reasoning="high",
                 workspace=Path(user_state_home),
-                metadata={"profile_options": {"validate_variant": False}},
+                metadata={
+                    "profile_options": {"validate_variant": False},
+                    "cortex_relay_state_dir": str(control_state),
+                },
             )
             observed = {}
 
             def capture_child(argv, *, cwd, env, check):
                 observed["argv"] = argv
                 observed["state_home"] = env["XDG_STATE_HOME"]
+                observed["control_state"] = env["CORTEX_RELAY_STATE_DIR"]
                 model_state = Path(env["XDG_STATE_HOME"]) / "opencode" / "model.json"
                 observed["variant"] = json.loads(model_state.read_text(encoding="utf-8"))[
                     "variant"
@@ -57,6 +62,8 @@ class OpenCodeHostLaunchTests(unittest.TestCase):
             self.assertEqual(observed["argv"][model_index], task.model)
             self.assertEqual(observed["variant"], "high")
             self.assertNotEqual(observed["state_home"], user_state_home)
+            self.assertNotEqual(observed["state_home"], observed["control_state"])
+            self.assertEqual(observed["control_state"], str(control_state.resolve()))
             self.assertFalse(Path(observed["state_home"]).exists())
             self.assertEqual(
                 json.loads(user_state.read_text(encoding="utf-8"))["variant"][task.model],
