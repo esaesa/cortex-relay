@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from cortex_relay.runtime.process import prepare_process_argv
+from cortex_relay.runtime.process import ProcessCancelledError, prepare_process_argv
 
 
 class CodexAppServerError(RuntimeError):
@@ -44,11 +44,13 @@ class CodexAppServerClient:
         cwd: Path,
         timeout_seconds: int,
         on_event: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         self.binary = binary
         self.cwd = cwd
         self.timeout_seconds = timeout_seconds
         self.on_event = on_event
+        self.cancel_event = cancel_event
         self._process: subprocess.Popen[str] | None = None
         self._stdout_queue: queue.Queue[str | BaseException | None] = queue.Queue()
         self._stderr: list[str] = []
@@ -310,12 +312,19 @@ class CodexAppServerClient:
             raise subprocess.TimeoutExpired(
                 [self.binary, "app-server"], self.timeout_seconds
             )
-        try:
-            item = self._stdout_queue.get(timeout=remaining)
-        except queue.Empty as exc:
-            raise subprocess.TimeoutExpired(
-                [self.binary, "app-server"], self.timeout_seconds
-            ) from exc
+        while True:
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                raise ProcessCancelledError("provider session cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(
+                    [self.binary, "app-server"], self.timeout_seconds
+                )
+            try:
+                item = self._stdout_queue.get(timeout=min(0.2, remaining))
+                break
+            except queue.Empty:
+                continue
         if item is None:
             stderr = "".join(self._stderr).strip()
             raise CodexAppServerError(
