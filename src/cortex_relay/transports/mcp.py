@@ -86,7 +86,7 @@ def create_server(
         preset: str | None = None,
         provider: str = "auto",
         workspace: str = ".",
-        access: str = "auto",
+        access: str = "read_only",
         reasoning: str = "high",
         model: str | None = None,
         acceptance_criteria: list[str] | None = None,
@@ -269,15 +269,16 @@ def create_server(
         preset: str | None = None,
         provider: str = "auto",
         workspace: str = ".",
-        access: str = "read_only",
+        access: str = "auto",
         reasoning: str = "high",
         model: str | None = None,
         timeout_seconds: int = 300,
         parent_session_id: str | None = None,
     ) -> dict[str, Any]:
-        """Start a direct persistent/resumable agent session.
+        """Start a direct persistent/resumable agent session and await its first turn.
 
-        This bypasses task DAGs, scheduler queues, worktree isolation, task budgets,
+        access=auto inherits the selected profile's configured access. This bypasses
+        task DAGs, scheduler queues, worktree isolation, task budgets, quality gates,
         and artifact handoff. Use delegate/delegate_async when those workflow
         guarantees are required. Closed-end providers are rejected here.
         """
