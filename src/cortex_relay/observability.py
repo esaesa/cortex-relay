@@ -16,6 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from cortex_relay.core.models import TaskResult, TaskSpec
+from cortex_relay.runtime.agent_backend import AgentStoreBackend
 from cortex_relay.runtime.agent_store import AgentStore
 from cortex_relay.runtime.progress import ProgressEvent
 from cortex_relay.runtime.state_lock import FileLock, lock_is_held
@@ -52,7 +53,7 @@ class RunStore:
         self,
         root: Path | None = None,
         *,
-        agent_store: Any | None = None,
+        agent_store: AgentStoreBackend | None = None,
     ) -> None:
         self.root = (root or _default_state_root()).expanduser().resolve()
         self.agent_store = agent_store
