@@ -214,6 +214,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     delegate_parser.add_argument("--max-tokens", type=int)
     delegate_parser.add_argument("--max-cost", type=float)
+    delegate_parser.add_argument("--max-tool-calls", type=int)
+    delegate_parser.add_argument("--max-repeated-calls", type=int)
+    delegate_parser.add_argument("--max-idle-seconds", type=int)
+    delegate_parser.add_argument("--max-runtime-seconds", type=int)
+    delegate_parser.add_argument("--max-child-agents", type=int)
     delegate_parser.add_argument("--require-changed-files", action="store_true")
     delegate_parser.add_argument("--require-tests", action="store_true")
     delegate_parser.add_argument("--allowed-path", action="append", default=[], dest="allowed_paths")
@@ -321,6 +326,19 @@ def _providers() -> int:
                 child_messaging=bool(item.get("child_messaging", False)),
             )
         )
+        health = item.get("runtime_health")
+        if isinstance(health, dict) and health.get("attempts"):
+            print(
+                "    health: attempts={attempts}, success={success_rate:.0%}, "
+                "timeouts={timeout_rate:.0%}, failures={failure_rate:.0%}, "
+                "latency_ema={latency}s".format(
+                    attempts=int(health.get("attempts") or 0),
+                    success_rate=float(health.get("success_rate") or 0.0),
+                    timeout_rate=float(health.get("timeout_rate") or 0.0),
+                    failure_rate=float(health.get("failure_rate") or 0.0),
+                    latency=health.get("ema_latency_seconds"),
+                )
+            )
     return 0
 
 
@@ -747,6 +765,11 @@ def _delegate(args: argparse.Namespace) -> int:
         budget=TaskBudget(
             max_tokens=args.max_tokens,
             max_cost=args.max_cost,
+            max_tool_calls=args.max_tool_calls,
+            max_repeated_calls=args.max_repeated_calls,
+            max_idle_seconds=args.max_idle_seconds,
+            max_runtime_seconds=args.max_runtime_seconds,
+            max_child_agents=args.max_child_agents,
         ),
         quality_gates=QualityGates(
             require_changed_files=args.require_changed_files,
@@ -766,6 +789,8 @@ def _delegate(args: argparse.Namespace) -> int:
         print(f"  summary:  {result.summary}")
         if result.error:
             print(f"  error:    {result.error}")
+        if result.termination_reason:
+            print(f"  reason:   {result.termination_reason}")
         if result.evidence:
             print("  evidence:")
             for item in result.evidence:
