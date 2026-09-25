@@ -52,6 +52,12 @@ class ProviderRegistry:
     def capabilities(self) -> list[dict[str, object]]:
         return [self._providers[name].capabilities().to_dict() for name in self.names()]
 
+    def provider(self, name: str) -> ProviderAdapter:
+        try:
+            return self._providers[name]
+        except KeyError as exc:
+            raise KeyError(f"unknown runtime provider: {name}") from exc
+
     def available_names(self) -> set[str]:
         return {
             name
@@ -93,7 +99,7 @@ class ProviderRegistry:
                     provider, line, agent_session_id, stream
                 ):
                     try:
-                        self._record_agent_event(provider, agent_event)
+                        self.record_agent_event(provider, agent_event)
                     except (OSError, ValueError):
                         pass
 
@@ -228,7 +234,7 @@ class ProviderRegistry:
     def clear_completed_status(self, workspace) -> int:
         return self.run_store.clear_completed(workspace)
 
-    def _record_agent_event(self, provider: str, event: Any) -> None:
+    def record_agent_event(self, provider: str, event: Any) -> None:
         saved = self.agent_store.record_event(event)
         kind = event.kind
         data = event.data if isinstance(event.data, dict) else {}
