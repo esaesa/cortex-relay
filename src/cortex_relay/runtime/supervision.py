@@ -9,6 +9,7 @@ from cortex_relay.runtime.progress import ProgressEvent
 class SupervisionViolation:
     reason: str
     activity: str
+    termination_reason: str
 
 
 class SupervisionTracker:
@@ -58,6 +59,7 @@ class SupervisionTracker:
                     f"{self.tool_calls} > {self.budget.max_tool_calls}"
                 ),
                 activity="Tool-call budget exceeded; cancellation requested",
+                termination_reason="tool_call_budget",
             )
 
         if (
@@ -71,6 +73,7 @@ class SupervisionTracker:
                     f"fingerprint={fingerprint!r}"
                 ),
                 activity="Repeated tool-call stall detected; cancellation requested",
+                termination_reason="repeated_tool_stall",
             )
         return None
 
@@ -96,6 +99,7 @@ class SupervisionTracker:
                     f"{len(self.child_ids)} > {self.budget.max_child_agents}"
                 ),
                 activity="Child-agent budget exceeded; cancellation requested",
+                termination_reason="child_agent_budget",
             )
         return None
 
@@ -112,5 +116,6 @@ class SupervisionTracker:
             return SupervisionViolation(
                 reason=f"token budget exceeded: {observed} > {limit}",
                 activity="Token budget exceeded; cancellation requested",
+                termination_reason="token_budget",
             )
         return None
