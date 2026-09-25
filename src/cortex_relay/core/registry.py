@@ -19,7 +19,7 @@ from cortex_relay.providers.codex import CodexAdapter
 from cortex_relay.providers.opencode import OpenCodeAdapter
 from cortex_relay.observability import RunStore, summarize_usage
 from cortex_relay.runtime.artifacts import ArtifactStore
-from cortex_relay.runtime.progress import normalize_progress
+from cortex_relay.runtime.progress import project_agent_event
 from cortex_relay.runtime.worktree import WorktreeManager
 
 
@@ -185,10 +185,22 @@ class ProviderRegistry:
         def progress_line(provider: str, line: str, stream: str = "stdout") -> None:
             task_record = self.run_store.get_task(source_workspace, task_id) or {}
             agent_session_id = task_record.get("agent_session_id")
+            semantic_session_id = (
+                agent_session_id
+                if isinstance(agent_session_id, str)
+                else f"task-progress:{task_id}"
+            )
+            semantic_events = normalize_agent_events(
+                provider,
+                line,
+                semantic_session_id,
+                stream,
+            )
+            if not semantic_events:
+                return
+
             if isinstance(agent_session_id, str):
-                for agent_event in normalize_agent_events(
-                    provider, line, agent_session_id, stream
-                ):
+                for agent_event in semantic_events:
                     try:
                         self.record_agent_event(provider, agent_event)
                     except (OSError, ValueError) as exc:
@@ -198,26 +210,44 @@ class ProviderRegistry:
                             exc,
                         )
 
-            event = normalize_progress(provider, line, task_id, stream)
-            if event is None:
+            progress_events = tuple(
+                projected
+                for semantic_event in semantic_events
+                if (
+                    projected := project_agent_event(
+                        semantic_event,
+                        task_id,
+                    )
+                ) is not None
+            )
+            if not progress_events:
                 return
-            self.run_store.record_progress(source_workspace, event)
-            if callable(external_progress):
-                try:
-                    external_progress(event)
-                except Exception:
-                    pass
+
+            observed_tokens: int | None = None
+            for event in progress_events:
+                self.run_store.record_progress(source_workspace, event)
+                if callable(external_progress):
+                    try:
+                        external_progress(event)
+                    except Exception:
+                        pass
+                candidate = event.total_tokens
+                if candidate is None and (
+                    event.input_tokens is not None
+                    or event.output_tokens is not None
+                ):
+                    candidate = (
+                        (event.input_tokens or 0) + (event.output_tokens or 0)
+                    )
+                if candidate is not None:
+                    observed_tokens = max(observed_tokens or 0, candidate)
+
             limit = task.budget.max_tokens
-            if limit is None:
-                return
-            observed = event.total_tokens
-            if observed is None:
-                observed = (
-                    (event.input_tokens or 0) + (event.output_tokens or 0)
-                    if event.input_tokens is not None or event.output_tokens is not None
-                    else None
-                )
-            if observed is not None and observed > limit:
+            if (
+                limit is not None
+                and observed_tokens is not None
+                and observed_tokens > limit
+            ):
                 cancel_event = task.metadata.get("_cancel_event")
                 if cancel_event is not None:
                     cancel_event.set()
@@ -225,7 +255,9 @@ class ProviderRegistry:
                     source_workspace,
                     task_id,
                     budget_exceeded=True,
-                    budget_reason=f"token budget exceeded: {observed} > {limit}",
+                    budget_reason=(
+                        f"token budget exceeded: {observed_tokens} > {limit}"
+                    ),
                     current_activity="Token budget exceeded; cancellation requested",
                 )
 

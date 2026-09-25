@@ -8,6 +8,10 @@ from cortex_relay.core.agents import AgentEvent
 
 
 _SECRET_KEY = re.compile(r"(?i)(api[_-]?key|access[_-]?token|authorization|password|secret)")
+_SECRET_VALUE = re.compile(
+    r"(?i)\b(api[_-]?key|access[_-]?token|authorization|password|secret)"
+    r"\b(\s*[:=]\s*)(\S+)"
+)
 _BEARER = re.compile(r"(?i)\bBearer\s+\S+")
 _LONG_TOKEN = re.compile(r"(?<![\w])[A-Za-z0-9_+/=-]{48,}(?![\w])")
 
@@ -28,7 +32,7 @@ def normalize_agent_events(
             AgentEvent(
                 session_id=session_id,
                 kind="diagnostic",
-                data={"stream": "stderr", "text": text[:4000]},
+                data={"stream": "stderr", "text": _sanitize(text[:4000])},
                 provider_event="stderr",
             ),
         )
@@ -70,8 +74,10 @@ def _antigravity(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ..
                     "state": "idle"
                     if str(result.get("status") or "").upper() in {"", "SUCCESS"}
                     else "failed",
+                    "status": result.get("status"),
                     "usage": result.get("usage"),
                     "duration_seconds": result.get("duration_seconds"),
+                    "error": result.get("error"),
                 },
                 kind,
             ),
@@ -94,6 +100,8 @@ def _antigravity(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ..
                     {
                         "text": delta,
                         "step_index": step.get("step_index"),
+                        "usage": step.get("usage"),
+                        "duration_seconds": step.get("duration_seconds"),
                     },
                     "step_update",
                 )
@@ -104,7 +112,12 @@ def _antigravity(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ..
             _event(
                 session_id,
                 "child_update",
-                child,
+                {
+                    **child,
+                    "step_index": step.get("step_index"),
+                    "usage": step.get("usage"),
+                    "duration_seconds": step.get("duration_seconds"),
+                },
                 "step_update",
             )
         )
@@ -124,6 +137,8 @@ def _antigravity(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ..
                     "output": info.get("output"),
                     "error": info.get("error"),
                     "step_index": step.get("step_index"),
+                    "usage": step.get("usage"),
+                    "duration_seconds": step.get("duration_seconds"),
                 },
                 "step_update",
             )
@@ -198,6 +213,19 @@ def _codex(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ...]:
         if method in {"item/started", "item/completed"}:
             item = _dict(params.get("item"))
             item_type = str(item.get("type") or "")
+            if item_type in {"todoList", "todo_list"}:
+                return (
+                    _event(
+                        session_id,
+                        "plan",
+                        {
+                            "items": item.get("items"),
+                            "state": "done" if method == "item/completed" else "running",
+                            "turn_id": params.get("turnId"),
+                        },
+                        method,
+                    ),
+                )
             if item_type == "agentMessage":
                 text = item.get("text")
                 if isinstance(text, str) and text:
@@ -265,6 +293,18 @@ def _codex(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ...]:
         )
     if kind in {"item.started", "item.updated", "item.completed"}:
         item = _dict(event.get("item"))
+        if item.get("type") == "todo_list":
+            return (
+                _event(
+                    session_id,
+                    "plan",
+                    {
+                        "items": item.get("items"),
+                        "state": "done" if kind == "item.completed" else "running",
+                    },
+                    kind,
+                ),
+            )
         if item.get("type") == "agent_message":
             text = item.get("text")
             return (
@@ -328,7 +368,10 @@ def _opencode(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ...]:
             _event(
                 session_id,
                 "lifecycle",
-                {"state": "running" if kind == "step_start" else "idle"},
+                {
+                    "state": "running" if kind == "step_start" else "idle",
+                    "usage": part.get("tokens"),
+                },
                 kind,
             )
         )
@@ -349,6 +392,7 @@ def _opencode(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ...]:
                     "output": state.get("output"),
                     "error": state.get("error"),
                     "metadata": state.get("metadata"),
+                    "time": state.get("time"),
                 },
                 kind,
             )
@@ -567,7 +611,8 @@ def _sanitize(value: Any, *, depth: int = 0) -> Any:
     if depth > 8:
         return "[truncated]"
     if isinstance(value, str):
-        text = _BEARER.sub("Bearer [redacted]", value)
+        text = _SECRET_VALUE.sub(r"\1\2[redacted]", value)
+        text = _BEARER.sub("Bearer [redacted]", text)
         text = _LONG_TOKEN.sub("[redacted]", text)
         return text[:16000]
     if isinstance(value, dict):
