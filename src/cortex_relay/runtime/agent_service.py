@@ -688,7 +688,15 @@ class AgentService:
             self.store.save_result(session_id, payload)
             self.store.update(
                 session_id,
-                state="idle" if result.status == "success" else "failed",
+                state=(
+                    "idle"
+                    if result.status == "success"
+                    else (
+                        "interrupted"
+                        if result.status in {"cancelled", "timeout"}
+                        else "failed"
+                    )
+                ),
             )
             return payload
         finally:
