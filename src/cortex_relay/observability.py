@@ -1139,6 +1139,16 @@ def _agent_event_summary(event: dict[str, Any]) -> str | None:
     if kind == "child_spawned":
         role = data.get("role") or "subagent"
         return f"spawned child {role}"
+    if kind == "untracked_child":
+        tool = data.get("tool") or "native subagent tool"
+        return f"untracked native child activity via {tool}"
+    if kind == "provider_session":
+        provider_id = data.get("provider_session_id")
+        return (
+            f"provider session {provider_id}"
+            if provider_id
+            else "provider session established"
+        )
     if kind == "diagnostic":
         detail = data.get("error") or data.get("text")
         return f"diagnostic: {detail}"[:120] if detail else "diagnostic"
@@ -1427,13 +1437,38 @@ def render_dashboard(
                 details.append(
                     "parent " + str(agent["parent_session_id"])[:18]
                 )
+            metadata = agent.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            provider_pid = metadata.get("provider_pid")
+            if provider_pid is not None:
+                process_state = (
+                    "alive"
+                    if metadata.get("provider_process_alive")
+                    else "not alive"
+                )
+                details.append(f"pid {provider_pid} {process_state}")
             lines.append("  " + " | ".join(details))
+
+            if metadata.get("untracked_native_work"):
+                count = int(metadata.get("untracked_native_work_count") or 1)
+                lines.append(
+                    f"  Warning: {count} native child event"
+                    f"{'s' if count != 1 else ''} could not be correlated to a child session"
+                )
 
             activity = agent.get("current_activity")
             if activity:
                 lines.append(f"  Current: {_truncate(str(activity), 120)}")
             elif state in {"starting", "running"}:
                 lines.append("  Current: waiting for provider activity")
+
+            provider_heartbeat = metadata.get("provider_heartbeat_at")
+            if isinstance(provider_heartbeat, str):
+                lines.append(
+                    "  Provider heartbeat: "
+                    + _elapsed({"started_at": provider_heartbeat}, now)
+                    + " ago"
+                )
 
             last_event = agent.get("last_event")
             if isinstance(last_event, dict):
