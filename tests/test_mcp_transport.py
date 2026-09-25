@@ -84,6 +84,7 @@ class MCPTransportMappingTests(unittest.TestCase):
         self.assertIn("synchronous delegate", server.instructions)
         self.assertIn("Never end a turn with uncompleted async tasks", server.instructions)
         self.assertIn("final_text", server.instructions)
+        self.assertIn("agent_session_id", server.instructions)
         wait_tool = next(
             t for t in server._tool_manager.list_tools() if t.name == "task_wait"
         )
@@ -93,6 +94,14 @@ class MCPTransportMappingTests(unittest.TestCase):
             t for t in server._tool_manager.list_tools() if t.name == "task_output"
         )
         self.assertIn("complete child final answer", output_tool.description)
+        agent_events_tool = next(
+            t for t in server._tool_manager.list_tools() if t.name == "agent_events"
+        )
+        self.assertIn("semantic agent events", agent_events_tool.description)
+        agent_send_tool = next(
+            t for t in server._tool_manager.list_tools() if t.name == "agent_send"
+        )
+        self.assertIn("resumable provider session", agent_send_tool.description)
 
 
 if __name__ == "__main__":

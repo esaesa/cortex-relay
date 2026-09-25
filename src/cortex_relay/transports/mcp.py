@@ -6,6 +6,7 @@ from typing import Any
 
 from cortex_relay.core.models import QualityGates, TaskBudget, TaskSpec
 from cortex_relay.core.registry import ProviderRegistry, default_registry
+from cortex_relay.runtime.agent_service import AgentService
 from cortex_relay.runtime.task_protocol import TaskControl
 from cortex_relay.runtime.task_service import TaskService
 
@@ -26,6 +27,7 @@ def create_server(
 
     runtime = registry or default_registry()
     async_tasks = async_tasks or TaskService(runtime)
+    agent_control = AgentService(runtime)
     server = MCPServer(
         "CortexRelay",
         instructions=(
@@ -33,8 +35,9 @@ def create_server(
             "The calling agent remains responsible for planning and final synthesis. "
             "Use synchronous delegate when you need the worker's output before you can answer the user's immediate request. "
             "Use delegate_async for parallel work or staged pipelines, then poll task_wait until the task reaches terminal status. "
-            "Successful results include final_text with the worker's complete answer; for large answers use task_output to retrieve it in chunks. "
-            "Never end a turn with uncompleted async tasks when the user is awaiting the outcome. "
+            "Successful results include final_text with the worker's complete answer and agent_session_id with the durable provider-backed session. "
+            "Use agent_events for rich live activity, agent_children for provider-native or Cortex-managed children, and agent_send to continue a resumable session. "
+            "For large answers use task_output to retrieve them in chunks. Never end a turn with uncompleted async tasks when the user is awaiting the outcome. "
             "Set access=workspace_write explicitly for implementation tasks. Use status/history to inspect work."
         ),
     )
@@ -256,6 +259,66 @@ def create_server(
                      confirmation_token: str | None = None) -> dict[str, Any]:
         """Prepare or confirm removal of a completed managed worktree."""
         return async_tasks.discard(task_id, attempt, confirmation_token)
+
+    @server.tool()
+    def agents(
+        parent_session_id: str | None = None,
+        root_session_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List durable CortexRelay agent sessions, optionally by parent or root."""
+        return agent_control.list(
+            parent_session_id=parent_session_id,
+            root_session_id=root_session_id,
+        )
+
+    @server.tool()
+    def agent_get(session_id: str) -> dict[str, Any]:
+        """Return one provider-backed agent session and its native session handle."""
+        return agent_control.get(session_id)
+
+    @server.tool()
+    def agent_events(
+        session_id: str,
+        after_sequence: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Return durable semantic agent events including text, tools and child updates."""
+        return agent_control.events(
+            session_id,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+
+    @server.tool()
+    def agent_messages(
+        session_id: str,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Return durable host/agent messages for one session."""
+        return agent_control.messages(session_id, limit=limit)
+
+    @server.tool()
+    def agent_children(session_id: str) -> list[dict[str, Any]]:
+        """Return provider-native and Cortex-managed child sessions."""
+        return agent_control.children(session_id)
+
+    @server.tool()
+    def agent_send(
+        session_id: str,
+        message: str,
+        timeout_seconds: int = 300,
+    ) -> dict[str, Any]:
+        """Send a follow-up to a resumable provider session and return its full result."""
+        return agent_control.send(
+            session_id,
+            message,
+            timeout_seconds=timeout_seconds,
+        )
+
+    @server.tool()
+    def agent_close(session_id: str) -> dict[str, Any]:
+        """Close the CortexRelay handle for an agent session."""
+        return agent_control.close(session_id)
 
     return server
 

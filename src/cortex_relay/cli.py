@@ -300,6 +300,16 @@ def _providers() -> int:
             "    features: structured_output={structured_output}, model_selection={model_selection}, "
             "reasoning_control={reasoning_control}, workspace_write={workspace_write}".format(**item)
         )
+        print(
+            "    sessions: mode={mode}, persistent={persistent}, streaming={streaming}, "
+            "native_subagents={native_subagents}, child_messaging={child_messaging}".format(
+                mode=item.get("session_mode", "closed_end"),
+                persistent=bool(item.get("persistent_sessions", False)),
+                streaming=bool(item.get("streaming_events", False)),
+                native_subagents=bool(item.get("native_subagents", False)),
+                child_messaging=bool(item.get("child_messaging", False)),
+            )
+        )
     return 0
 
 

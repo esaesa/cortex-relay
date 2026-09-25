@@ -128,6 +128,32 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertEqual(config["permission"]["task"], "deny")
         self.assertEqual(config["permission"]["bash"]["*"], "ask")
 
+    @patch("cortex_relay.providers.opencode.shutil.which", return_value="/usr/bin/opencode")
+    def test_session_continuation_reuses_session_and_allows_native_subagents(self, _which):
+        runner = FakeRunner()
+        adapter = OpenCodeAdapter(runner=runner)
+        with tempfile.TemporaryDirectory() as tmp:
+            task = TaskSpec(
+                objective="Continue review",
+                provider="opencode",
+                model="opencode/gpt-6-luna",
+                workspace=Path(tmp),
+                access="workspace_write",
+                metadata={"profile_options": {"validate_variant": False}},
+            )
+            result = adapter.continue_session(task, "session-existing")
+
+        self.assertTrue(result.ok)
+        call = runner.calls[-1]
+        argv = call["argv"]
+        self.assertEqual(argv[0], "opencode")
+        self.assertNotIn("--pure", argv)
+        self.assertIn("--session", argv)
+        self.assertEqual(argv[argv.index("--session") + 1], "session-existing")
+        config = json.loads(call["env"]["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(config["permission"]["task"], "allow")
+        self.assertEqual(result.metadata["transport"], "session")
+
     def test_worker_disables_inherited_cortex_relay_mcp(self):
         inherited = json.dumps(
             {

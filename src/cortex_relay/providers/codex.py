@@ -13,6 +13,7 @@ from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner
 from cortex_relay.runtime.progress import runner_progress_kwargs
 
 from .base import ProviderAdapter, ProviderCapabilities
+from .codex_app_server import CodexAppServerClient, CodexAppServerError
 from .codex_models import compatibility_error, known_model_ids
 from .result_schema import RESULT_SCHEMA
 
@@ -41,6 +42,11 @@ class CodexAdapter(ProviderAdapter):
             detail=path or f"{self.binary} was not found on PATH",
             known_models=known_model_ids(),
             reasoning_levels=CODEX_REASONING_LEVELS,
+            session_mode="native",
+            persistent_sessions=True,
+            streaming_events=True,
+            native_subagents=True,
+            child_messaging=False,
         )
 
     def command_for(
@@ -74,6 +80,173 @@ class CodexAdapter(ProviderAdapter):
             argv.append("--ephemeral")
         argv.append(self._prompt(task))
         return argv
+
+    def execute_session(self, task: TaskSpec) -> TaskResult:
+        return self._execute_app_server(task, provider_session_id=None)
+
+    def continue_session(self, task: TaskSpec, provider_session_id: str) -> TaskResult:
+        return self._execute_app_server(task, provider_session_id=provider_session_id)
+
+    def _execute_app_server(
+        self,
+        task: TaskSpec,
+        *,
+        provider_session_id: str | None,
+    ) -> TaskResult:
+        capabilities = self.capabilities()
+        if not capabilities.available:
+            return TaskResult(
+                status="unavailable",
+                provider=self.name,
+                model=task.model,
+                summary="Codex CLI is unavailable.",
+                error=capabilities.detail,
+            )
+        if not task.workspace.exists():
+            return TaskResult(
+                status="error",
+                provider=self.name,
+                model=task.model,
+                summary="Delegated workspace does not exist.",
+                error=str(task.workspace),
+            )
+        incompatibility = compatibility_error(task.model, task.reasoning)
+        if incompatibility:
+            return TaskResult(
+                status="error",
+                provider=self.name,
+                model=task.model,
+                summary="Codex model/reasoning configuration is incompatible.",
+                error=incompatibility,
+            )
+
+        cancel_event = task.metadata.get("_cancel_event")
+        if cancel_event is not None and cancel_event.is_set():
+            return TaskResult(
+                status="cancelled",
+                provider=self.name,
+                model=task.model,
+                summary="Codex task was cancelled before the session turn started.",
+                error="provider session cancelled",
+            )
+
+        before = self._git_snapshot(task.workspace) if task.access == "read_only" else None
+        started = time.monotonic()
+        progress = task.metadata.get("_progress_line")
+
+        def on_event(line: str) -> None:
+            if callable(progress):
+                progress(self.name, line, "stdout")
+
+        client = CodexAppServerClient(
+            binary=self.binary,
+            cwd=task.workspace,
+            timeout_seconds=task.timeout_seconds + 15,
+            on_event=on_event,
+            cancel_event=cancel_event if hasattr(cancel_event, "is_set") else None,
+        )
+        try:
+            turn = client.run_turn(
+                prompt=self._prompt(task),
+                thread_id=provider_session_id,
+                model=task.model,
+                reasoning=task.reasoning,
+                sandbox="read-only" if task.access == "read_only" else "workspace-write",
+                output_schema=RESULT_SCHEMA,
+            )
+        except ProcessCancelledError:
+            return TaskResult(
+                status="cancelled",
+                provider=self.name,
+                model=task.model,
+                summary="Codex session turn was cancelled.",
+                error="provider session cancelled",
+                conversation_id=provider_session_id,
+                duration_seconds=time.monotonic() - started,
+                metadata={"transport": "app-server"},
+            )
+        except subprocess.TimeoutExpired:
+            return TaskResult(
+                status="timeout",
+                provider=self.name,
+                model=task.model,
+                summary="Codex session turn timed out.",
+                error=f"timeout after {task.timeout_seconds} seconds",
+                conversation_id=provider_session_id,
+                duration_seconds=time.monotonic() - started,
+                metadata={"transport": "app-server"},
+            )
+        except CodexAppServerError as exc:
+            return TaskResult(
+                status="error",
+                provider=self.name,
+                model=task.model,
+                summary="Codex app-server session failed.",
+                error=str(exc),
+                conversation_id=provider_session_id,
+                duration_seconds=time.monotonic() - started,
+                metadata={"transport": "app-server"},
+            )
+
+        payload = _parse_json_object(turn.final_text)
+        if payload is None:
+            return TaskResult(
+                status="error",
+                provider=self.name,
+                model=task.model,
+                summary="Codex app-server did not produce the required structured final result.",
+                error="final assistant message was not a JSON object matching the result contract",
+                conversation_id=turn.thread_id,
+                duration_seconds=time.monotonic() - started,
+                usage=turn.usage,
+                metadata={
+                    "transport": "app-server",
+                    "turn_id": turn.turn_id,
+                    "event_count": len(turn.events),
+                    "stderr": turn.stderr,
+                },
+            )
+
+        after = self._git_snapshot(task.workspace) if before is not None else None
+        if before is not None and after is not None and before != after:
+            return TaskResult(
+                status="error",
+                provider=self.name,
+                model=task.model,
+                summary="Read-only Codex delegation changed the workspace.",
+                error="Provider violated the read_only contract; inspect git status before continuing.",
+                changed_files=tuple(sorted(after.symmetric_difference(before))),
+                conversation_id=turn.thread_id,
+                duration_seconds=time.monotonic() - started,
+                usage=turn.usage,
+                metadata={"transport": "app-server", "turn_id": turn.turn_id},
+            )
+
+        return TaskResult(
+            status="success",
+            provider=self.name,
+            model=task.model,
+            summary=str(payload.get("summary", "")).strip(),
+            final_text=str(payload.get("final_text", "")).strip(),
+            evidence=tuple(
+                Evidence.from_dict(item)
+                for item in payload.get("evidence", [])
+                if isinstance(item, dict)
+            ),
+            changed_files=_string_tuple(payload.get("changed_files")),
+            commands=_string_tuple(payload.get("commands")),
+            tests=_string_tuple(payload.get("tests")),
+            risks=_string_tuple(payload.get("risks")),
+            conversation_id=turn.thread_id,
+            duration_seconds=time.monotonic() - started,
+            usage=turn.usage,
+            metadata={
+                "transport": "app-server",
+                "turn_id": turn.turn_id,
+                "event_count": len(turn.events),
+                "stderr": turn.stderr,
+            },
+        )
 
     def execute(self, task: TaskSpec) -> TaskResult:
         capabilities = self.capabilities()
@@ -316,3 +489,19 @@ def _string_tuple(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(str(item).strip() for item in value if str(item).strip())
+
+
+def _parse_json_object(value: str) -> dict[str, Any] | None:
+    text = value.strip()
+    fence = chr(96) * 3
+    if text.startswith(fence):
+        lines = text.splitlines()
+        if len(lines) >= 3 and lines[-1].strip() == fence:
+            text = "\n".join(lines[1:-1]).strip()
+            if text.startswith("json\n"):
+                text = text[5:].lstrip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None

@@ -1,8 +1,8 @@
 # Runtime delegation
 
-CortexRelay 0.9 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI through the same provider-neutral runtime, with direct CLI, MCP, and A2A frontends.
+CortexRelay supports OpenCode, Antigravity CLI, and OpenAI Codex through one provider-neutral, session-first runtime with direct CLI, MCP, and A2A frontends.
 
-The primary coding agent remains the orchestrator. CortexRelay does not attempt to replace its planning loop. It receives an already-bounded task, applies deterministic routing policy, executes the selected provider, and returns a normalized result that preserves both structured metadata and the worker's complete final answer.
+The primary coding agent remains the orchestrator. CortexRelay does not replace its planning loop. A bounded `TaskSpec` describes orchestration policy, but provider execution happens through a durable `AgentSession`. The session preserves the provider-native conversation/thread/session handle, rich semantic events, child-agent topology, messages, and a lossless `TaskResult` for each completed turn.
 
 ## Runtime flow
 
@@ -13,26 +13,28 @@ Codex / Gemini / another coding agent
               v
         CortexRelay runtime
               |
-      +-------+--------+
-      |                |
- routing policy   workspace policy
-      |                |
-      +-------+--------+
-              |
-        provider adapter
-              |
-        +--------+--------+--------+
-        |        |        |
-        v        v        v
-    OpenCode  Antigravity  Codex
-        |        |        |
-        +--------+--------+
+      routing / budgets / workspace policy
               |
               v
-       normalized TaskResult
+        durable AgentSession
+              |
+      +-------+---------+---------+
+      |                 |         |
+ OpenCode session   AGY conversation   Codex app-server thread
+      |                 |         |
+      +---- semantic events / child sessions ----+
+              |
+              v
+           TaskResult
 ```
 
-The runtime currently ships adapters for OpenCode, Antigravity CLI, and OpenAI Codex CLI. Additional providers should implement the same `ProviderAdapter` contract rather than leaking provider-specific flags into the core.
+The built-in providers are session-aware:
+
+- **Codex:** app-server thread + streamed JSON-RPC notifications; `codex exec` remains a closed-end fallback.
+- **OpenCode:** persistent OpenCode session, including continuation by session ID and native task/subagent visibility; `--pure run` remains a closed-end fallback.
+- **Antigravity:** resumable conversation ID with `stream-json` events and native subagent metadata.
+
+Additional providers can implement the same `ProviderAdapter` contract. Providers without a session API can intentionally remain `session_mode="closed_end"`; that path is useful for unknown future providers and CI-style one-shot work, but it no longer defines the core architecture.
 
 ## Install
 
@@ -105,14 +107,12 @@ cortex-relay history --json
 
 The state captures:
 - host session/profile/model/reasoning when launched through CortexRelay;
-- worker task ID, role, profile, provider, model, reasoning and billing class;
-- fallback attempts;
-- worktree path/branch;
-- elapsed/provider-reported duration;
-- normalized input/output/total token counts when available;
-- provider-reported cost when available;
-- tests, changed files, risks, result summary and errors;
-- provider conversation/session identifiers.
+- orchestration task ID, role, profile, provider, model, reasoning and billing class;
+- Cortex agent-session ID and provider-native session/thread/conversation ID;
+- parent/root agent links and provider-native child sessions;
+- durable semantic events such as response deltas, tools, lifecycle transitions and child updates;
+- host↔agent message history and complete final text;
+- fallback attempts, worktree path/branch, usage, tests, changed files, risks and errors.
 
 State is deliberately kept outside the project checkout:
 - Windows: `%LOCALAPPDATA%\CortexRelay\state`;
@@ -173,36 +173,31 @@ cortex-relay delegate \
 
 Write-capable CLI tasks use an isolated git worktree by default. The result includes `worktree_path` and `worktree_branch`. Use `--no-isolate-write` only when you intentionally want the provider to work directly in the supplied workspace.
 
-## Normalized contract
+## Runtime contracts
 
-`TaskSpec` carries provider-neutral inputs:
+CortexRelay separates orchestration, execution state and completed-turn output:
 
-- objective
-- role
-- provider
-- workspace
-- access mode
-- reasoning level
-- optional model
-- acceptance criteria
-- timeout
-- write-isolation preference
+### `TaskSpec`
 
-Every adapter returns a `TaskResult` with the same shape:
+Provider-neutral intent and policy: objective, role/profile/provider, workspace, access, reasoning/model, acceptance criteria, timeout, budget, quality gates and isolation.
 
-- status
-- provider/model
-- summary
-- compact evidence
-- changed files
-- commands
-- tests
-- risks
-- conversation identifier
-- usage metadata
-- runtime metadata
+### `AgentSession`
 
-This lets the calling coding agent reason over results without learning each provider's CLI envelope.
+The execution primitive. It stores the Cortex session ID, provider-native session handle, provider/model/reasoning/access, task/parent/root links, state and metadata.
+
+### `AgentEvent`
+
+The durable semantic stream. Events include response deltas, provider-session binding, lifecycle changes, tool activity, diagnostics and native child-agent updates. Sensitive keys/tokens are redacted before persistence.
+
+### `AgentMessage`
+
+Durable host→agent, agent→host and agent→agent handoffs.
+
+### `TaskResult`
+
+The completed-turn envelope: status, provider/model, compact summary/evidence, changed files, commands, tests, risks, provider session identifier, usage metadata and `final_text`, the complete answer intended for the parent.
+
+This lets the orchestrator inspect or continue a worker without learning each provider's native protocol.
 
 ## Execution profiles and role routing
 
@@ -278,7 +273,7 @@ cortex-relay launch --role orchestrator
 
 The launcher uses the profile's OpenCode model and reasoning variant, keeps the interactive OpenCode session user-facing, and injects a local CortexRelay MCP server into that host session. The orchestrator can then delegate bounded roles through the same profile registry.
 
-Delegated OpenCode workers are deliberately different from the host: they run as fresh `--pure` processes with the worker permission overlay, and the inherited `cortex-relay` MCP server is disabled inside those child runs to prevent recursive delegation loops.
+Delegated OpenCode workers use OpenCode's session model as the primary path. The inherited `cortex-relay` MCP server remains disabled inside those worker sessions to prevent recursive re-delegation through CortexRelay, while OpenCode's native `task` subagents are allowed and mirrored into the Cortex agent tree. The old `--pure run` path remains available only as closed-end execution.
 
 `cortex-relay launch` currently supports OpenCode host profiles. Other host agents can use CortexRelay via MCP or A2A.
 
@@ -310,65 +305,37 @@ For write-capable tasks, each isolated attempt can produce its own worktree. Ena
 
 ## OpenCode adapter
 
-The OpenCode adapter uses non-interactive `opencode --pure run --format json` execution. It accepts provider/model IDs through `--model`, maps the profile reasoning field to OpenCode `--variant`, parses JSON events, captures the session identifier and usage metadata, and normalizes the final JSON text into `TaskResult`.
+The preferred OpenCode path uses OpenCode's persistent session model. CortexRelay launches `opencode run --format json`, captures the provider session ID, and reuses it with `--session <id>` for follow-up turns. Session-mode workers may use OpenCode's native `task` subagents; their child session IDs are mirrored into `AgentSession` records. CortexRelay's own MCP server is disabled inside delegated OpenCode workers so native subagents cannot accidentally recurse through the same Cortex task.
 
-Discover the model IDs exposed by the installed OpenCode/provider configuration:
+The explicit closed-end path still uses `opencode --pure run --format json`. It is useful for one-shot jobs where session continuation and native child visibility are unnecessary.
+
+OpenCode accepts provider/model IDs through `--model`, maps profile reasoning to `--variant`, streams JSON events, and receives a worker-only permission overlay. Read-only workers deny edits; external directories, skills and web tools remain denied; shell execution defaults to approval-required with a narrow repository/test/build allowlist.
+
+Discover models/variants with:
 
 ```bash
 cortex-relay models --provider opencode --refresh
 cortex-relay models --provider opencode --refresh --verbose
 cortex-relay models --provider opencode --refresh --json
-cortex-relay models --provider antigravity
-cortex-relay models --provider antigravity --json
 ```
-
-OpenCode variant validation is best-effort. When verbose model metadata explicitly lists variants, CortexRelay rejects a requested variant that is absent. When metadata is unavailable or does not advertise variants, the value is passed through.
-
-CortexRelay injects a worker-only `OPENCODE_CONFIG_CONTENT` permission overlay rather than modifying the user's persistent OpenCode settings. Broad automatic approval is not enabled. Read-only workers deny edits; external directories, native task/subagent delegation, skills, and web tools are denied; shell execution defaults to approval-required with a narrow repository/test/build allowlist. `--pure` is also used to exclude external plugins from delegated worker runs.
-
-Read-only OpenCode tasks receive the same before/after git-status contract check as the other provider adapters.
 
 ## Codex adapter
 
-The Codex adapter uses non-interactive `codex exec` with:
+The preferred Codex path uses `codex app-server --listen stdio://`. CortexRelay performs the JSON-RPC initialization handshake, starts or resumes a Codex thread, starts a turn with the Cortex result JSON Schema, consumes streamed notifications such as agent-message deltas/tool/turn events, and persists the thread ID as the provider session handle. Follow-ups resume the same thread through `thread/resume`.
 
-- `--json` JSONL lifecycle events;
-- `--output-schema` for the normalized result schema;
-- `--output-last-message` for reliable final structured output;
-- `--model` when the task pins a model;
-- `model_reasoning_effort` for the requested effort;
-- `--sandbox read-only` or `--sandbox workspace-write` according to the task access contract.
+`codex exec --json --output-schema --output-last-message` remains an explicit closed-end fallback rather than the primary orchestration transport.
 
-CortexRelay does **not** pass Codex's dangerous approval/sandbox bypass option.
+CortexRelay does not pass Codex's dangerous approval/sandbox bypass option. Read-only Codex work also compares Git status before and after execution, while write-capable work uses the same provider-neutral worktree isolation as other adapters.
 
-Current compatibility hints are:
-
-| Model | Known reasoning efforts |
-| --- | --- |
-| `gpt-6-astra` | low, medium, high, xhigh, max |
-| `gpt-6-sol` | none, low, medium, high, xhigh, max |
-| `gpt-6-luna` | none, low, medium, high, xhigh, max |
-
-These are hints, not an allowlist. Unknown future model IDs and reasoning names are passed through to Codex CLI so a newer installed Codex can use them without waiting for a CortexRelay release. CortexRelay only rejects model/effort combinations it knows are incompatible.
-
-Read-only Codex tasks also compare git status before and after execution. Write-capable tasks inherit the same provider-neutral worktree isolation used by other adapters.
+Current model/effort compatibility hints remain advisory rather than an allowlist; unknown future model IDs and reasoning names are passed through when they are not known to be incompatible.
 
 ## Antigravity adapter
 
-CortexRelay discovers the live Antigravity model catalog through `agy models`. The command currently returns a human-readable list rather than JSON, so CortexRelay parses the model slug and display label conservatively and falls back to manual model entry only if discovery returns no usable models.
+Antigravity uses resumable headless conversations. The initial turn runs through `agy -p` with `stream-json`, an enforced result schema, model/effort selection and sandbox restrictions. CortexRelay stores the returned `conversation_id` and follow-up turns reuse it with `--conversation <id>`.
 
-The adapter uses headless `agy -p` execution with:
+The rich stream is preserved as semantic agent events: response text deltas, tool updates and `subagent_info` including child conversation IDs, log URIs and workspace URIs. Native Antigravity children are mirrored into the Cortex agent tree and can be addressed through their provider session handles where supported.
 
-- JSON output;
-- an enforced JSON Schema;
-- explicit reasoning effort;
-- optional model selection;
-- a print timeout;
-- terminal sandbox restrictions.
-
-Read-only tasks additionally compare git status before and after the run. Any workspace change is reported as a contract violation.
-
-CortexRelay intentionally does not pass Antigravity's global auto-approval flag. Provider permissions should remain scoped by the user's Antigravity configuration.
+CortexRelay discovers live Antigravity models with `agy models` and intentionally does not enable the provider's global auto-approval mode.
 
 ## Artifact-aware workflow control
 
@@ -449,32 +416,30 @@ cortex-relay serve \
   --port 8765
 ```
 
-The MCP surface is deliberately small:
+The MCP surface has two control layers.
 
-- `providers`
-- `profiles`
-- `status`
-- `history`
-- `delegate`
-- `delegate_parallel`
-- `delegate_async`
-- `task_status`
-- `task_events`
-- `task_wait`
-- `task_output`
-- `task_cancel`
-- `tasks`
-- `task_artifact`
-- `task_worktree`
-- `task_diff`
-- `task_apply`
-- `task_discard`
+Task/workflow tools:
+
+- `providers`, `profiles`, `status`, `history`
+- `delegate`, `delegate_parallel`, `delegate_async`
+- `task_status`, `task_events`, `task_wait`, `task_output`, `task_cancel`, `tasks`
+- `task_artifact`, `task_worktree`, `task_diff`, `task_apply`, `task_discard`
+
+Agent/session tools:
+
+- `agents`
+- `agent_get`
+- `agent_events`
+- `agent_messages`
+- `agent_children`
+- `agent_send`
+- `agent_close`
 
 `delegate` and `delegate_parallel` are synchronous: the MCP request waits for the provider work to finish. Use them for short, bounded tasks. A client-side timeout does not cancel workers already launched by `delegate_parallel` and may prevent their results from reaching the caller. For longer work or parallel orchestration, call `delegate_async` for each task and retain the returned task IDs. Each task may choose a profile or an explicit `opencode`, `codex`, or `antigravity` provider; write-capable tasks are isolated into separate git worktrees by default.
 
-`delegate_async` starts a task and immediately returns its full task ID. It also accepts dependency inheritance, priority, trace-parent/depth, budgets and quality-gate inputs. Use `task_status` to read the latest observable tool activity and `task_events(task_id, after_sequence=0, limit=20)` to fetch subsequent events with a cursor. Pass the returned `next_sequence` into the next `task_events` call. `task_wait` retrieves the full normalized result (`timeout_seconds=0` polls), including `final_text`, the worker's complete answer intended for the parent. `task_output(task_id, offset=0, max_chars=65536)` reads that same durable answer in bounded chunks for large outputs and returns `next_offset`, `total_chars`, `complete`, and a SHA-256 digest. `task_cancel` requests cancellation. Each `task_wait` call waits at most five seconds so it stays within MCP client request deadlines, even if given a larger value. `tasks(workspace=".", group_id=None)` lists persisted async jobs in a workspace. Set `access=workspace_write` explicitly for implementation tasks. The synchronous `delegate` tool remains available.
+`delegate_async` starts a task and immediately returns its full task ID. Once provider execution begins, the task record exposes `agent_session_id`. Use `agent_events` for the richer semantic stream, `agent_children` to traverse native or Cortex-managed children, `agent_messages` for durable handoffs, and `agent_send` to continue a resumable provider session without creating a fresh logical worker. It also accepts dependency inheritance, priority, trace-parent/depth, budgets and quality-gate inputs. Use `task_status` to read the latest observable tool activity and `task_events(task_id, after_sequence=0, limit=20)` to fetch subsequent events with a cursor. Pass the returned `next_sequence` into the next `task_events` call. `task_wait` retrieves the full normalized result (`timeout_seconds=0` polls), including `final_text`, the worker's complete answer intended for the parent. `task_output(task_id, offset=0, max_chars=65536)` reads that same durable answer in bounded chunks for large outputs and returns `next_offset`, `total_chars`, `complete`, and a SHA-256 digest. `task_cancel` requests cancellation. Each `task_wait` call waits at most five seconds so it stays within MCP client request deadlines, even if given a larger value. `tasks(workspace=".", group_id=None)` lists persisted async jobs in a workspace. Set `access=workspace_write` explicitly for implementation tasks. The synchronous `delegate` tool remains available.
 
-Async task identity, status, events, the complete normalized result, and the child's complete final text are stored on disk. The result JSON retains `final_text`, while a dedicated UTF-8 output file provides lossless paged retrieval. A new MCP server can inspect a completed task by ID and return the exact result or page through the exact final answer. If the owning server exits while a task is active or queued, the task becomes `interrupted`; CortexRelay does not resume or kill the unknown worker. A task still owned by a live other server stays active, and `task_cancel` reports `owned_elsewhere` from this server. Older terminal records without full results return `result_unavailable`. Queued tasks are not relaunched automatically after owner loss. The dashboard and MCP status expose observable activity, not model reasoning. Antigravity uses its `stream-json` events, while OpenCode and Codex use their existing JSON event streams.
+Async task identity, status, events, the complete normalized result, and the child's complete final text are stored on disk. The result JSON retains `final_text`, while a dedicated UTF-8 output file provides lossless paged retrieval. A new MCP server can inspect a completed task by ID and return the exact result or page through the exact final answer. If the owning server exits while a task is active or queued, the task becomes `interrupted`; CortexRelay does not resume or kill the unknown worker. A task still owned by a live other server stays active, and `task_cancel` reports `owned_elsewhere` from this server. Older terminal records without full results return `result_unavailable`. Queued tasks are not relaunched automatically after owner loss. The dashboard remains a bounded operational view, while `agent_events` is the richer durable semantic stream. CortexRelay does not expose hidden chain-of-thought; it stores observable provider messages/deltas, tool/lifecycle events, usage, diagnostics and child-agent metadata.
 
 `delegate_async` also accepts `group_id` and `depends_on`, a list of earlier async task IDs in the same workspace. A dependent task remains `queued` without occupying a worker until all prerequisites succeed. If one fails, the dependent becomes `blocked` and `blocked_by` names the failed IDs. For example, submit two explorers with `group_id="feature-auth"`, then an implementer with `depends_on=[explorer_a_id, explorer_b_id]`; inspect the group with `tasks(group_id="feature-auth")`. Group membership does not change permissions or merge worktree contents.
 
@@ -530,7 +495,7 @@ The A2A server is unauthenticated in version 0.8. CortexRelay therefore refuses 
 
 ## Provider development
 
-New providers should implement:
+New providers advertise their session capabilities explicitly:
 
 ```python
 class ProviderAdapter(ABC):
@@ -539,8 +504,20 @@ class ProviderAdapter(ABC):
     def capabilities(self) -> ProviderCapabilities:
         ...
 
-    def execute(self, task: TaskSpec) -> TaskResult:
+    def execute_session(self, task: TaskSpec) -> TaskResult:
         ...
+
+    def continue_session(
+        self,
+        task: TaskSpec,
+        provider_session_id: str,
+    ) -> TaskResult:
+        ...
+
+    def execute(self, task: TaskSpec) -> TaskResult:
+        ...  # closed-end fallback
 ```
 
-Provider-specific command flags, response envelopes, authentication behavior, and error translation belong inside the adapter. Routing, task semantics, and result semantics belong in the core.
+A provider with a native thread/conversation/session API should set `persistent_sessions`, `streaming_events`, `native_subagents` and `child_messaging` accurately. A provider with no richer control channel may deliberately stay `session_mode="closed_end"`; `execute_session()` defaults to that one-shot path.
+
+Provider-specific command flags, response envelopes, authentication behavior and error translation remain inside adapters. Routing, session/event/message semantics and result semantics belong in the core.

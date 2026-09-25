@@ -4,9 +4,12 @@ import subprocess
 
 from dataclasses import replace
 from typing import Any
+from pathlib import Path
 from datetime import datetime, timezone
 
 from cortex_relay.core.models import TaskResult, TaskSpec
+from cortex_relay.runtime.agent_store import AgentStore
+from cortex_relay.runtime.agent_events import normalize_agent_events
 from cortex_relay.core.policy import RoutingPolicy
 from cortex_relay.core.profiles import ExecutionProfile, ProfileResolver, RuntimeProfileConfig
 from cortex_relay.providers.antigravity import AntigravityAdapter
@@ -34,6 +37,7 @@ class ProviderRegistry:
         self.worktrees = worktrees or WorktreeManager()
         self.profiles = profiles or ProfileResolver()
         self.run_store = run_store or RunStore()
+        self.agent_store = AgentStore(self.run_store.root)
         for provider in providers or []:
             self.register(provider)
 
@@ -47,6 +51,12 @@ class ProviderRegistry:
 
     def capabilities(self) -> list[dict[str, object]]:
         return [self._providers[name].capabilities().to_dict() for name in self.names()]
+
+    def provider(self, name: str) -> ProviderAdapter:
+        try:
+            return self._providers[name]
+        except KeyError as exc:
+            raise KeyError(f"unknown runtime provider: {name}") from exc
 
     def available_names(self) -> set[str]:
         return {
@@ -82,6 +92,17 @@ class ProviderRegistry:
         metadata["_observability_workspace"] = str(source_workspace)
         external_progress = metadata.get("_external_progress")
         def progress_line(provider: str, line: str, stream: str = "stdout") -> None:
+            task_record = self.run_store.get_task(source_workspace, task_id) or {}
+            agent_session_id = task_record.get("agent_session_id")
+            if isinstance(agent_session_id, str):
+                for agent_event in normalize_agent_events(
+                    provider, line, agent_session_id, stream
+                ):
+                    try:
+                        self.record_agent_event(provider, agent_event)
+                    except (OSError, ValueError):
+                        pass
+
             event = normalize_progress(provider, line, task_id, stream)
             if event is None:
                 return
@@ -212,6 +233,128 @@ class ProviderRegistry:
 
     def clear_completed_status(self, workspace) -> int:
         return self.run_store.clear_completed(workspace)
+
+    def record_agent_event(self, provider: str, event: Any) -> None:
+        saved = self.agent_store.record_event(event)
+        kind = event.kind
+        data = event.data if isinstance(event.data, dict) else {}
+        if kind == "provider_session":
+            provider_session_id = data.get("provider_session_id")
+            if isinstance(provider_session_id, str) and provider_session_id:
+                self.agent_store.bind_provider_session(
+                    event.session_id, provider_session_id
+                )
+        elif kind == "child_update":
+            provider_session_id = data.get("provider_session_id")
+            if isinstance(provider_session_id, str) and provider_session_id:
+                self.agent_store.upsert_child(
+                    parent_session_id=event.session_id,
+                    provider_session_id=provider_session_id,
+                    provider=provider,
+                    state=str(data.get("state") or "running"),
+                    role=str(data.get("role") or "subagent"),
+                    metadata={
+                        key: value
+                        for key, value in data.items()
+                        if key not in {"provider_session_id", "state", "role"}
+                    },
+                )
+        elif kind == "message":
+            text = data.get("text")
+            if isinstance(text, str) and text:
+                self.agent_store.add_message(
+                    event.session_id,
+                    direction="agent_to_host",
+                    content=text,
+                    sender_session_id=event.session_id,
+                    metadata={
+                        "provider_event": event.provider_event,
+                        "sequence": saved.get("sequence"),
+                        "phase": data.get("phase"),
+                    },
+                )
+
+    def _start_agent_session(
+        self,
+        task: TaskSpec,
+        provider: ProviderAdapter,
+    ) -> tuple[TaskSpec, str]:
+        parent_session_id = task.metadata.get("_parent_agent_session_id")
+        parent = parent_session_id if isinstance(parent_session_id, str) else None
+        root_session_id = None
+        if parent:
+            try:
+                root_session_id = (
+                    self.agent_store.get(parent).root_session_id or parent
+                )
+            except ValueError:
+                parent = None
+        session = self.agent_store.create(
+            provider=provider.name,
+            workspace=task.workspace,
+            task_id=str(task.metadata.get("_task_id") or "") or None,
+            model=task.model,
+            reasoning=task.reasoning,
+            access=task.access,
+            role=task.role,
+            objective=task.objective,
+            parent_session_id=parent,
+            root_session_id=root_session_id,
+            metadata={
+                "transport": provider.capabilities().session_mode,
+                "profile": task.profile,
+            },
+        )
+        task_id = task.metadata.get("_task_id")
+        source_workspace = task.metadata.get("_observability_workspace")
+        if isinstance(task_id, str) and isinstance(source_workspace, str):
+            current = self.run_store.get_task(Path(source_workspace), task_id) or {}
+            prior = [
+                str(item)
+                for item in (current.get("agent_session_ids") or [])
+                if isinstance(item, str)
+            ]
+            self.run_store.update_task(
+                Path(source_workspace),
+                task_id,
+                agent_session_id=session.session_id,
+                agent_session_ids=list(dict.fromkeys([*prior, session.session_id])),
+            )
+        return replace(
+            task,
+            metadata={**task.metadata, "_agent_session_id": session.session_id},
+        ), session.session_id
+
+    def _finish_agent_session(
+        self,
+        session_id: str,
+        result: TaskResult,
+    ) -> TaskResult:
+        if result.conversation_id:
+            try:
+                self.agent_store.bind_provider_session(
+                    session_id, result.conversation_id
+                )
+            except ValueError:
+                pass
+        try:
+            self.agent_store.update(
+                session_id,
+                state="idle" if result.status == "success" else "failed",
+            )
+            if result.final_text:
+                self.agent_store.add_message(
+                    session_id,
+                    direction="agent_to_host",
+                    content=result.final_text,
+                    sender_session_id=session_id,
+                    metadata={"final": True, "status": result.status},
+                )
+        except ValueError:
+            pass
+        metadata = dict(result.metadata)
+        metadata["agent_session_id"] = session_id
+        return replace(result, metadata=metadata)
 
     def _observe(self, task: TaskSpec, **updates: Any) -> None:
         task_id = task.metadata.get("_task_id")
@@ -365,7 +508,10 @@ class ProviderRegistry:
                 model=task.model,
                 reasoning=task.reasoning,
             )
-            return provider.execute(task)
+            task, agent_session_id = self._start_agent_session(task, provider)
+            return self._finish_agent_session(
+                agent_session_id, provider.execute_session(task)
+            )
 
         self._observe(task, status="preparing", provider=provider.name)
         task_id = task.metadata.get("_task_id")
@@ -445,7 +591,10 @@ class ProviderRegistry:
                           "worktree_base_commit": worktree.base_commit},
             )
         isolated = replace(task, workspace=worktree.path, isolate_write=False)
-        result = provider.execute(isolated)
+        isolated, agent_session_id = self._start_agent_session(isolated, provider)
+        result = self._finish_agent_session(
+            agent_session_id, provider.execute_session(isolated)
+        )
         metadata = dict(result.metadata)
         metadata.update(
             {
