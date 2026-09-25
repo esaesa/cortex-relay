@@ -21,6 +21,16 @@ class AgentStoreTests(unittest.TestCase):
             objective="inspect",
         )
 
+    def test_schema_version_and_integrity_are_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AgentStore(Path(tmp) / "state")
+            self.assertEqual(store.schema_version(), 1)
+            self.assertEqual(store.integrity_check(), ("ok",))
+            health = store.health()
+            self.assertTrue(health["ok"])
+            self.assertEqual(health["schema_version"], 1)
+            self.assertEqual(health["expected_schema_version"], 1)
+
     def test_session_events_messages_and_children_are_durable(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -200,6 +210,49 @@ class AgentStoreTests(unittest.TestCase):
             self.assertIn("lease expired", reconciled.metadata["interrupted_reason"])
             events = store.events(session.session_id)["events"]
             self.assertEqual(events[-1]["provider_event"], "lease_expired")
+
+    def test_gc_prunes_terminal_agent_tree_without_orphaning_children(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "repo"
+            workspace.mkdir()
+            store = AgentStore(root / "state")
+
+            parent = self._session(store, workspace)
+            child = store.upsert_child(
+                parent_session_id=parent.session_id,
+                provider_session_id="child-provider-session",
+                provider="fake",
+                state="running",
+                role="explorer",
+            )
+            store.update(parent.session_id, state="idle")
+            store.update(child.session_id, state="idle")
+            active = self._session(store, workspace)
+
+            preview = store.gc(
+                workspace=workspace,
+                retention_days=0,
+                max_completed_roots=100,
+                dry_run=True,
+            )
+            self.assertEqual(preview["count"], 1)
+            self.assertEqual(
+                set(preview["agents"][0]["sessions"]),
+                {parent.session_id, child.session_id},
+            )
+
+            result = store.gc(
+                workspace=workspace,
+                retention_days=0,
+                max_completed_roots=100,
+            )
+            self.assertEqual(result["count"], 1)
+            with self.assertRaises(ValueError):
+                store.get(parent.session_id)
+            with self.assertRaises(ValueError):
+                store.get(child.session_id)
+            self.assertEqual(store.get(active.session_id).state, "starting")
 
     def test_workspace_filtering_uses_indexed_session_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
