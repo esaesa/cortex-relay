@@ -54,6 +54,14 @@ class TaskControl(Protocol):
 
     def artifact(self, task_id: str, *, create: bool = True) -> dict[str, Any]: ...
 
+    def output(
+        self,
+        task_id: str,
+        *,
+        offset: int = 0,
+        max_chars: int = 65536,
+    ) -> dict[str, Any]: ...
+
     def worktree(
         self,
         task_id: str,

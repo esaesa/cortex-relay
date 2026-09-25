@@ -295,6 +295,7 @@ class OpenCodeAdapter(ProviderAdapter):
             provider=self.name,
             model=task.model,
             summary=str(payload.get("summary", "")).strip(),
+            final_text=str(payload.get("final_text", "")).strip(),
             evidence=tuple(
                 Evidence.from_dict(item)
                 for item in payload.get("evidence", [])
@@ -432,8 +433,12 @@ class OpenCodeAdapter(ProviderAdapter):
             f"{access_instruction}\n\n"
             "Acceptance criteria:\n"
             f"{criteria}\n\n"
-            "Return compact evidence and no unrelated material. Your FINAL text response "
-            "must be ONLY one JSON object matching this schema, with no markdown fences:\n"
+            "Return one JSON object and no markdown fences. Put a compact synopsis in summary, "
+            "but put your COMPLETE answer to the parent in final_text. Do not shorten final_text "
+            "merely to fit the summary; it must preserve all material findings, reasoning conclusions, "
+            "implementation details, caveats, and recommendations needed to satisfy the objective. "
+            "Use the remaining fields as machine-readable indexes over that answer. Your FINAL text "
+            "response must match this schema:\n"
             f"{schema}"
         )
 

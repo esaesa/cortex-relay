@@ -169,6 +169,7 @@ class ProviderRegistry:
                 provider=result.provider,
                 model=result.model,
                 summary="CortexRelay stopped or rejected work after its configured budget was exceeded.",
+                final_text=result.final_text,
                 evidence=result.evidence,
                 changed_files=result.changed_files,
                 commands=result.commands,

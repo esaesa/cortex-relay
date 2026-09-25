@@ -219,6 +219,7 @@ class AntigravityAdapter(ProviderAdapter):
             provider=self.name,
             model=task.model,
             summary=str(payload.get("summary", "")).strip(),
+            final_text=str(payload.get("final_text", "")).strip(),
             evidence=tuple(
                 Evidence.from_dict(item)
                 for item in payload.get("evidence", [])
@@ -253,7 +254,10 @@ class AntigravityAdapter(ProviderAdapter):
             f"{access_instruction}\n\n"
             "Acceptance criteria:\n"
             f"{criteria}\n\n"
-            "Return compact evidence. Do not include long transcripts or unrelated findings. "
+            "Return structured output only. Keep summary compact, but put your COMPLETE answer "
+            "to the parent in final_text. Do not compress final_text into a synopsis; preserve all "
+            "material findings, conclusions, implementation details, caveats, and recommendations "
+            "needed to satisfy the objective. The remaining fields are machine-readable indexes. "
             "Your final answer must satisfy the enforced JSON schema."
         )
 
@@ -288,6 +292,7 @@ class AntigravityAdapter(ProviderAdapter):
                 pass
             return {
                 "summary": response.strip(),
+                "final_text": response.strip(),
                 "evidence": [],
                 "changed_files": [],
                 "commands": [],
@@ -296,6 +301,7 @@ class AntigravityAdapter(ProviderAdapter):
             }
         return {
             "summary": "",
+            "final_text": "",
             "evidence": [],
             "changed_files": [],
             "commands": [],
