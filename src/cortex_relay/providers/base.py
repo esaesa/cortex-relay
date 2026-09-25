@@ -32,6 +32,7 @@ class ProviderCapabilities:
 
 class ProviderAdapter(ABC):
     name: str
+    session_protocol: str = "legacy_exec"
 
     @abstractmethod
     def capabilities(self) -> ProviderCapabilities:
@@ -40,6 +41,21 @@ class ProviderAdapter(ABC):
     @abstractmethod
     def execute(self, task: TaskSpec) -> TaskResult:
         raise NotImplementedError
+
+    def continue_session(
+        self,
+        task: TaskSpec,
+        provider_session_id: str,
+        message: str,
+    ) -> TaskResult:
+        """Continue a provider-native session.
+
+        Providers without a native continuation path intentionally remain
+        closed-end fallbacks rather than pretending to be resumable.
+        """
+        raise NotImplementedError(
+            f"{self.name} provider does not expose a resumable session protocol"
+        )
 
     def execute_session(self, task: TaskSpec) -> TaskResult:
         """Execute one turn using the provider's preferred session transport."""
