@@ -56,6 +56,35 @@ class AgentEventNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized[0].kind, "text_delta")
         self.assertEqual(normalized[0].data["text"], "hello")
 
+    def test_codex_spawn_receiver_becomes_child_immediately(self):
+        event = {
+            "method": "item/started",
+            "params": {
+                "threadId": "parent-thread",
+                "turnId": "turn-1",
+                "item": {
+                    "type": "collabAgentToolCall",
+                    "id": "call-1",
+                    "tool": "spawnAgent",
+                    "status": "inProgress",
+                    "senderThreadId": "parent-thread",
+                    "receiverThreadIds": ["child-thread"],
+                    "prompt": "inspect",
+                    "model": "gpt-6-luna",
+                    "reasoningEffort": "high",
+                    "agentsStates": {},
+                },
+            },
+        }
+        normalized = normalize_agent_events(
+            "codex",
+            json.dumps(event),
+            "agent-root",
+        )
+        child = next(item for item in normalized if item.kind == "child_update")
+        self.assertEqual(child.data["provider_session_id"], "child-thread")
+        self.assertEqual(child.data["metadata"]["sender_thread_id"], "parent-thread")
+
     def test_opencode_task_tool_child_is_preserved(self):
         event = {
             "type": "tool",
