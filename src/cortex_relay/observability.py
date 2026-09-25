@@ -16,6 +16,7 @@ from typing import Any
 from uuid import uuid4
 
 from cortex_relay.core.models import TaskResult, TaskSpec
+from cortex_relay.runtime.agent_store import AgentStore
 from cortex_relay.runtime.progress import ProgressEvent
 from cortex_relay.runtime.state_lock import FileLock, lock_is_held
 
@@ -680,6 +681,29 @@ class RunStore:
             completed_only=completed_only,
         )
         sessions = self.list_sessions(workspace, limit=5)
+
+        agent_store = AgentStore(self.root)
+        agents: list[dict[str, Any]] = []
+        if not completed_only:
+            agents = agent_store.list(
+                workspace=_workspace(workspace),
+                active_only=active_only,
+                limit=limit,
+            )
+            for agent in agents:
+                session_id = agent.get("session_id")
+                if not isinstance(session_id, str):
+                    continue
+                try:
+                    recent = agent_store.recent_events(session_id, limit=5)
+                except (OSError, ValueError):
+                    recent = []
+                agent["recent_events"] = recent
+                agent["last_event"] = recent[-1] if recent else None
+                agent["current_activity"] = (
+                    _agent_event_summary(recent[-1]) if recent else None
+                )
+
         active = sum(item.get("status") in ACTIVE_STATUSES for item in tasks)
         success = sum(item.get("status") == "success" for item in tasks)
         failed = sum(
@@ -689,6 +713,15 @@ class RunStore:
             }
             for item in tasks
         )
+        agent_running = sum(
+            item.get("state") in {"starting", "running"} for item in agents
+        )
+        agent_idle = sum(item.get("state") == "idle" for item in agents)
+        agent_failed = sum(
+            item.get("state") in {"failed", "interrupted"} for item in agents
+        )
+        agent_closed = sum(item.get("state") == "closed" for item in agents)
+
         total_input = 0
         total_output = 0
         total_tokens = 0
@@ -711,6 +744,7 @@ class RunStore:
             "state_directory": str(self._workspace_dir(workspace)),
             "sessions": sessions,
             "tasks": tasks,
+            "agents": agents,
             "active_only": active_only,
             "summary": {
                 "active": active,
@@ -720,6 +754,13 @@ class RunStore:
                 "output_tokens": total_output,
                 "total_tokens": total_tokens,
                 "cost": total_cost if cost_known else None,
+            },
+            "agent_summary": {
+                "running": agent_running,
+                "idle": agent_idle,
+                "failed": agent_failed,
+                "closed": agent_closed,
+                "total": len(agents),
             },
         }
 
@@ -1070,6 +1111,32 @@ def summarize_usage(usage: dict[str, Any]) -> dict[str, Any]:
     if cost is not None:
         summary["cost"] = float(cost)
     return summary
+
+
+def _agent_event_summary(event: dict[str, Any]) -> str | None:
+    kind = str(event.get("kind") or "")
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    if kind == "lifecycle":
+        state = data.get("state")
+        return f"state {state}" if state else "state update"
+    if kind in {"text_delta", "message"}:
+        text = data.get("text")
+        if isinstance(text, str) and text.strip():
+            return " ".join(text.strip().split())[:120]
+    if kind == "tool":
+        name = data.get("name") or data.get("item_type") or "tool"
+        state = data.get("state") or data.get("status")
+        return f"{name}{f' ({state})' if state else ''}"
+    if kind == "child_update":
+        role = data.get("role") or "subagent"
+        state = data.get("state") or "running"
+        return f"child {role}: {state}"
+    if kind == "diagnostic":
+        detail = data.get("error") or data.get("text")
+        return f"diagnostic: {detail}"[:120] if detail else "diagnostic"
+    if kind == "provider_session":
+        return "provider session established"
+    return kind or None
 
 
 def render_dashboard(
