@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from cortex_relay.core.models import TaskSpec
+from cortex_relay.core.models import TaskBudget, TaskSpec
 from cortex_relay.core.registry import ProviderRegistry
 from cortex_relay.runtime.agent_events import normalize_agent_events
 
@@ -90,6 +90,31 @@ class AgentService:
                     with self._lock:
                         if self._lease_owners.get(session_id) == owner_id:
                             self._lease_owners.pop(session_id, None)
+
+    def _renew_lease_on_progress(self, session_id: str) -> None:
+        """Refresh durable ownership when the provider emits meaningful progress."""
+        with self._lock:
+            owner_id = self._lease_owners.get(session_id)
+        renewed = False
+        if owner_id is not None:
+            try:
+                renewed = self.store.heartbeat(
+                    session_id,
+                    owner_id,
+                    ttl_seconds=self._lease_ttl_seconds,
+                )
+            except (OSError, ValueError):
+                renewed = False
+        try:
+            self.store.merge_metadata(
+                session_id,
+                {
+                    "last_progress_at": time.time(),
+                    "lease_renewed_by_progress": renewed,
+                },
+            )
+        except (OSError, ValueError):
+            pass
 
     def _begin_lease(self, session_id: str) -> str:
         owner_id = f"{os.getpid()}:{threading.get_ident()}:{uuid4().hex}"
@@ -181,6 +206,11 @@ class AgentService:
         model: str | None,
         timeout_seconds: int,
         parent_session_id: str | None,
+        max_tool_calls: int | None = None,
+        max_repeated_calls: int | None = None,
+        max_idle_seconds: int | None = None,
+        max_runtime_seconds: int | None = None,
+        max_child_agents: int | None = None,
         on_started: Any = None,
     ) -> TaskSpec:
         if not objective.strip():
@@ -201,7 +231,9 @@ class AgentService:
             model=model,
             timeout_seconds=timeout_seconds,
         )
-        metadata: dict[str, Any] = {}
+        metadata: dict[str, Any] = {
+            "_agent_progress": self._renew_lease_on_progress,
+        }
         if parent_session_id is not None:
             parent = self.store.get(parent_session_id)
             if parent.workspace.resolve() != resolved_workspace:
@@ -220,8 +252,19 @@ class AgentService:
             access=resolved_access,  # type: ignore[arg-type]
             reasoning=reasoning,
             model=model,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=(
+                min(timeout_seconds, max_runtime_seconds)
+                if max_runtime_seconds is not None
+                else timeout_seconds
+            ),
             isolate_write=False,
+            budget=TaskBudget(
+                max_tool_calls=max_tool_calls,
+                max_repeated_calls=max_repeated_calls,
+                max_idle_seconds=max_idle_seconds,
+                max_runtime_seconds=max_runtime_seconds,
+                max_child_agents=max_child_agents,
+            ),
             metadata=metadata,
         )
 
@@ -239,6 +282,11 @@ class AgentService:
         model: str | None = None,
         timeout_seconds: int = 300,
         parent_session_id: str | None = None,
+        max_tool_calls: int | None = None,
+        max_repeated_calls: int | None = None,
+        max_idle_seconds: int | None = None,
+        max_runtime_seconds: int | None = None,
+        max_child_agents: int | None = None,
     ) -> dict[str, Any]:
         """Start a direct persistent provider-backed agent session and await its first turn."""
         holder: dict[str, str] = {}
@@ -268,6 +316,11 @@ class AgentService:
             model=model,
             timeout_seconds=timeout_seconds,
             parent_session_id=parent_session_id,
+            max_tool_calls=max_tool_calls,
+            max_repeated_calls=max_repeated_calls,
+            max_idle_seconds=max_idle_seconds,
+            max_runtime_seconds=max_runtime_seconds,
+            max_child_agents=max_child_agents,
             on_started=on_started,
         )
         task = replace(
@@ -308,6 +361,11 @@ class AgentService:
         model: str | None = None,
         timeout_seconds: int = 300,
         parent_session_id: str | None = None,
+        max_tool_calls: int | None = None,
+        max_repeated_calls: int | None = None,
+        max_idle_seconds: int | None = None,
+        max_runtime_seconds: int | None = None,
+        max_child_agents: int | None = None,
     ) -> dict[str, Any]:
         """Start a direct persistent session concurrently and return its session ID.
 
@@ -346,6 +404,11 @@ class AgentService:
             model=model,
             timeout_seconds=timeout_seconds,
             parent_session_id=parent_session_id,
+            max_tool_calls=max_tool_calls,
+            max_repeated_calls=max_repeated_calls,
+            max_idle_seconds=max_idle_seconds,
+            max_runtime_seconds=max_runtime_seconds,
+            max_child_agents=max_child_agents,
             on_started=on_started,
         )
         task = TaskSpec(
