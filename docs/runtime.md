@@ -130,7 +130,7 @@ Override with `CORTEX_RELAY_STATE_DIR`.
 
 ### Direct-agent durability and recovery
 
-Persistent agent sessions use a transactional SQLite/WAL store under the CortexRelay state directory. Sessions, provider-native handles, parent/root links, events, messages, results, and direct-turn leases are indexed tables rather than independently scanned JSON/JSONL files.
+Persistent agent sessions use a transactional SQLite/WAL store under the canonical CortexRelay state directory. Sessions, provider-native handles, parent/root links, events, messages, results, and direct-turn leases are indexed tables rather than independently scanned JSON/JSONL files. The store records an explicit schema version and `cortex-relay doctor` runs a SQLite integrity check. Interactive OpenCode hosts use a temporary XDG directory only for OpenCode's own model/variant state; CortexRelay injects `CORTEX_RELAY_STATE_DIR` into the embedded MCP process so the dashboard, CLI, and MCP agent controls never diverge onto different state roots.
 
 Operational guarantees for direct sessions:
 - event and message sequence cursors are monotonic and allocated transactionally;
@@ -407,7 +407,7 @@ max_event_log_mb = 10
 cleanup_on_start = true
 ```
 
-Use `cortex-relay gc --dry-run` before pruning. Active tasks, their required dependency records, and Git worktrees are never deleted by state GC.
+Use `cortex-relay gc --dry-run` before pruning. Active tasks, their required dependency records, and Git worktrees are never deleted by state GC. Terminal direct-agent sessions are pruned by complete root agent tree, not row-by-row, so parent/child topology cannot be partially orphaned.
 
 Workflow inspection:
 
