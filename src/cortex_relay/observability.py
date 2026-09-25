@@ -48,8 +48,14 @@ def _task_locked(method):
 class RunStore:
     """Cross-process, per-workspace runtime observability state."""
 
-    def __init__(self, root: Path | None = None) -> None:
+    def __init__(
+        self,
+        root: Path | None = None,
+        *,
+        agent_store: Any | None = None,
+    ) -> None:
         self.root = (root or _default_state_root()).expanduser().resolve()
+        self.agent_store = agent_store
         self._session_locks: dict[str, FileLock] = {}
 
     def start_session(
@@ -702,7 +708,7 @@ class RunStore:
         )
         sessions = self.list_sessions(workspace, limit=5)
 
-        agent_store = AgentStore(self.root)
+        agent_store = self.agent_store or AgentStore(self.root)
         agents: list[dict[str, Any]] = []
         all_agents: list[dict[str, Any]] = []
         if not completed_only:
@@ -970,7 +976,8 @@ class RunStore:
             except OSError:
                 continue
 
-        agent_gc = AgentStore(self.root).gc(
+        agent_store = self.agent_store or AgentStore(self.root)
+        agent_gc = agent_store.gc(
             workspace=workspace,
             retention_days=retention_days,
             max_completed_roots=max_completed_tasks,
