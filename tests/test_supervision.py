@@ -25,6 +25,7 @@ class SupervisionTrackerTests(unittest.TestCase):
         self.assertIsNotNone(violation)
         assert violation is not None
         self.assertIn("repeated tool-call budget exceeded", violation.reason)
+        self.assertEqual(violation.termination_reason, "repeated_tool_stall")
 
     def test_child_agent_limit_counts_unique_children(self):
         tracker = SupervisionTracker(TaskBudget(max_child_agents=1))
@@ -56,6 +57,7 @@ class SupervisionTrackerTests(unittest.TestCase):
         self.assertIsNotNone(violation)
         assert violation is not None
         self.assertIn("child-agent budget exceeded", violation.reason)
+        self.assertEqual(violation.termination_reason, "child_agent_budget")
 
     def test_token_limit_uses_total_or_input_output_fallback(self):
         tracker = SupervisionTracker(TaskBudget(max_tokens=100))
@@ -68,6 +70,8 @@ class SupervisionTrackerTests(unittest.TestCase):
         )
         violation = tracker.observe(total)
         self.assertIsNotNone(violation)
+        assert violation is not None
+        self.assertEqual(violation.termination_reason, "token_budget")
 
         fallback = SupervisionTracker(TaskBudget(max_tokens=100))
         split = ProgressEvent(
