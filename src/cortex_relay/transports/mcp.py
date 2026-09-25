@@ -33,7 +33,7 @@ def create_server(
         instructions=(
             "CortexRelay is a cross-provider agent control plane. "
             "Keep planning, arbitration, routing decisions, and final synthesis in the calling host. "
-            "Prefer persistent provider-native agent sessions when available and treat closed-end execution as an explicit fallback for one-shot or unsupported cases. "
+            "Prefer persistent provider-native agent sessions when available. Use agent_start for direct resumable specialists, and use delegate/delegate_async for DAG, scheduler, budget, worktree, or artifact workflows. Treat closed-end execution as an explicit fallback for one-shot or unsupported cases. "
             "Every delegated agent and provider-native child must remain observable through CortexRelay with durable session identity, semantic events, messages, state, and complete final output. "
             "Use incremental cursors for live activity instead of repeatedly re-reading full state. "
             "Provider-native subagents are allowed, but they remain subject to CortexRelay depth, budget, access, scheduling, workspace, and quality policies. "
@@ -260,6 +260,40 @@ def create_server(
                      confirmation_token: str | None = None) -> dict[str, Any]:
         """Prepare or confirm removal of a completed managed worktree."""
         return async_tasks.discard(task_id, attempt, confirmation_token)
+
+    @server.tool()
+    def agent_start(
+        objective: str,
+        role: str = "reviewer",
+        profile: str | None = None,
+        preset: str | None = None,
+        provider: str = "auto",
+        workspace: str = ".",
+        access: str = "read_only",
+        reasoning: str = "high",
+        model: str | None = None,
+        timeout_seconds: int = 300,
+        parent_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Start a direct persistent/resumable agent session.
+
+        This bypasses task DAGs, scheduler queues, worktree isolation, task budgets,
+        and artifact handoff. Use delegate/delegate_async when those workflow
+        guarantees are required. Closed-end providers are rejected here.
+        """
+        return agent_control.start(
+            objective=objective,
+            role=role,
+            profile=profile,
+            preset=preset,
+            provider=provider,
+            workspace=workspace,
+            access=access,
+            reasoning=reasoning,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            parent_session_id=parent_session_id,
+        )
 
     @server.tool()
     def agents(
