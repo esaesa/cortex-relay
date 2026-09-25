@@ -10,6 +10,7 @@ class ResultSchemaTests(unittest.TestCase):
             set(RESULT_SCHEMA["properties"]),
         )
         self.assertFalse(RESULT_SCHEMA["additionalProperties"])
+        self.assertEqual(RESULT_SCHEMA["properties"]["final_text"]["type"], "string")
 
     def test_evidence_items_require_every_declared_property(self):
         items = RESULT_SCHEMA["properties"]["evidence"]["items"]
