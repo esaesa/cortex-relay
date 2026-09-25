@@ -45,7 +45,14 @@ class ProviderRegistry:
         # Keep the backend injectable so a future multi-host implementation can
         # provide the same AgentStore contract with PostgreSQL or another
         # transactional coordinator. SQLite remains the default single-host store.
-        self.agent_store = agent_store or AgentStore(self.run_store.root)
+        self.agent_store = (
+            agent_store
+            or self.run_store.agent_store
+            or AgentStore(self.run_store.root)
+        )
+        # RunStore owns the CLI/status join. Point it at the exact same backend
+        # so status/history/gc cannot diverge from direct-agent control state.
+        self.run_store.agent_store = self.agent_store
         for provider in providers or []:
             self.register(provider)
 
