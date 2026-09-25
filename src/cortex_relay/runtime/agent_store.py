@@ -175,9 +175,13 @@ class AgentStore:
         *,
         parent_session_id: str | None = None,
         root_session_id: str | None = None,
+        workspace: Path | None = None,
+        active_only: bool = False,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         directory = self.root / "agent-sessions"
         rows: list[AgentSession] = []
+        resolved_workspace = workspace.expanduser().resolve() if workspace is not None else None
         if directory.exists():
             for path in directory.glob("*.json"):
                 data = self._read_json(path)
@@ -188,8 +192,14 @@ class AgentStore:
                     continue
                 if root_session_id is not None and session.root_session_id != root_session_id:
                     continue
+                if resolved_workspace is not None and session.workspace.resolve() != resolved_workspace:
+                    continue
+                if active_only and session.state not in {"starting", "running"}:
+                    continue
                 rows.append(session)
         rows.sort(key=lambda item: item.updated_at or "", reverse=True)
+        if limit is not None:
+            rows = rows[: max(1, limit)]
         return [item.to_dict() for item in rows]
 
     def children(self, session_id: str) -> list[dict[str, Any]]:
@@ -238,6 +248,29 @@ class AgentStore:
             "events": events,
             "next_sequence": int(events[-1]["sequence"]) if events else after_sequence,
         }
+
+    def recent_events(
+        self,
+        session_id: str,
+        *,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Return the newest semantic events for dashboard/status rendering."""
+        self.get(session_id)
+        if not 1 <= limit <= 50:
+            raise ValueError("limit must be 1..50")
+        path = self._events_path(session_id)
+        rows: list[dict[str, Any]] = []
+        if path.exists():
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        item = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(item, dict):
+                        rows.append(item)
+        return rows[-limit:]
 
     def add_message(
         self,
