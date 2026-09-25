@@ -321,8 +321,9 @@ def create_server(
         """Start a direct persistent/resumable agent session and await its first turn.
 
         access=auto inherits the selected profile's configured access. This bypasses
-        task DAGs, scheduler queues, worktree isolation, task budgets, quality gates,
-        and artifact handoff. Use delegate/delegate_async when those workflow
+        task DAGs, scheduler queues, worktree isolation, token/cost workflow budgets,
+        quality gates, and artifact handoff, but supports direct supervision limits
+        for tools, repeats, idle time, runtime, and child agents. Use delegate/delegate_async when those workflow
         guarantees are required. Closed-end providers are rejected here.
         """
         return agent_control.start(
@@ -368,9 +369,10 @@ def create_server(
         Returns agent_session_id as soon as the Cortex session exists, without
         creating a workflow task. Use this for parallel direct specialists and
         consume agent_events with sequence cursors plus agent_wait for completion.
-        access=auto inherits the selected profile's configured access. Use
-        delegate_async instead when DAG scheduling, task budgets, worktree
-        isolation, quality gates, or artifact lineage are required.
+        access=auto inherits the selected profile's configured access. Direct
+        supervision limits remain available for tools, repeats, idle time, runtime,
+        and child agents. Use delegate_async instead when DAG scheduling, token/cost
+        workflow budgets, worktree isolation, quality gates, or artifact lineage are required.
         """
         return agent_control.start_async(
             objective=objective,
