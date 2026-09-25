@@ -482,7 +482,15 @@ class ProviderRegistry:
             self.agent_store.save_result(session_id, finalized.to_dict())
             self.agent_store.update(
                 session_id,
-                state="idle" if finalized.status == "success" else "failed",
+                state=(
+                    "idle"
+                    if finalized.status == "success"
+                    else (
+                        "interrupted"
+                        if finalized.status in {"cancelled", "timeout"}
+                        else "failed"
+                    )
+                ),
             )
         except (OSError, ValueError) as exc:
             logger.warning(
@@ -493,7 +501,15 @@ class ProviderRegistry:
             try:
                 self.agent_store.update(
                     session_id,
-                    state="idle" if finalized.status == "success" else "failed",
+                    state=(
+                        "idle"
+                        if finalized.status == "success"
+                        else (
+                            "interrupted"
+                            if finalized.status in {"cancelled", "timeout"}
+                            else "failed"
+                        )
+                    ),
                 )
             except (OSError, ValueError) as state_exc:
                 logger.error(
