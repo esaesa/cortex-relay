@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from cortex_relay.core.models import TaskSpec
 from cortex_relay.core.registry import ProviderRegistry
@@ -15,7 +17,19 @@ from cortex_relay.runtime.agent_events import normalize_agent_events
 class AgentService:
     """Provider-neutral control surface for live or resumable agent sessions."""
 
-    def __init__(self, registry: ProviderRegistry, *, max_workers: int = 32) -> None:
+    def __init__(
+        self,
+        registry: ProviderRegistry,
+        *,
+        max_workers: int = 32,
+        lease_ttl_seconds: float = 30.0,
+        lease_heartbeat_seconds: float = 5.0,
+    ) -> None:
+        if lease_ttl_seconds <= 0:
+            raise ValueError("lease_ttl_seconds must be positive")
+        if not 0 < lease_heartbeat_seconds < lease_ttl_seconds:
+            raise ValueError("lease_heartbeat_seconds must be positive and less than lease_ttl_seconds")
+
         self.registry = registry
         self.store = registry.agent_store
         self.executor = ThreadPoolExecutor(
@@ -24,10 +38,87 @@ class AgentService:
         )
         self._futures: dict[str, Future[Any]] = {}
         self._lock = threading.Lock()
+        self._lease_ttl_seconds = lease_ttl_seconds
+        self._lease_heartbeat_seconds = lease_heartbeat_seconds
+        self._lease_owners: dict[str, str] = {}
+        self._lease_shutdown = threading.Event()
+
+        # Recover direct sessions whose owning process disappeared before this
+        # service started. Only sessions with an expired durable lease are touched.
+        try:
+            self.store.reconcile_expired()
+        except (OSError, ValueError):
+            pass
+
+        self._lease_thread = threading.Thread(
+            target=self._lease_loop,
+            name="cortex-agent-lease",
+            daemon=True,
+        )
+        self._lease_thread.start()
 
     def shutdown(self, *, wait: bool = True) -> None:
-        """Release direct-agent worker threads owned by this service."""
+        """Release direct-agent worker threads and durable leases."""
         self.executor.shutdown(wait=wait, cancel_futures=True)
+        self._lease_shutdown.set()
+        self._lease_thread.join(timeout=max(1.0, self._lease_heartbeat_seconds * 2))
+        with self._lock:
+            leased = list(self._lease_owners.items())
+            self._lease_owners.clear()
+        for session_id, owner_id in leased:
+            try:
+                self.store.release_lease(session_id, owner_id)
+            except (OSError, ValueError):
+                pass
+
+    def _lease_loop(self) -> None:
+        while not self._lease_shutdown.wait(self._lease_heartbeat_seconds):
+            with self._lock:
+                leased = list(self._lease_owners.items())
+            for session_id, owner_id in leased:
+                try:
+                    alive = self.store.heartbeat(
+                        session_id,
+                        owner_id,
+                        ttl_seconds=self._lease_ttl_seconds,
+                    )
+                except (OSError, ValueError):
+                    alive = False
+                if not alive:
+                    with self._lock:
+                        if self._lease_owners.get(session_id) == owner_id:
+                            self._lease_owners.pop(session_id, None)
+
+    def _begin_lease(self, session_id: str) -> str:
+        owner_id = f"{os.getpid()}:{threading.get_ident()}:{uuid4().hex}"
+        acquired = self.store.acquire_lease(
+            session_id,
+            owner_id,
+            ttl_seconds=self._lease_ttl_seconds,
+            owner_pid=os.getpid(),
+        )
+        if not acquired:
+            raise ValueError(
+                f"agent session {session_id} already has an active turn owner"
+            )
+        with self._lock:
+            prior = self._lease_owners.get(session_id)
+            if prior is not None and prior != owner_id:
+                self.store.release_lease(session_id, owner_id)
+                raise ValueError(
+                    f"agent session {session_id} is already executing in this runtime"
+                )
+            self._lease_owners[session_id] = owner_id
+        return owner_id
+
+    def _end_lease(self, session_id: str, owner_id: str) -> None:
+        with self._lock:
+            if self._lease_owners.get(session_id) == owner_id:
+                self._lease_owners.pop(session_id, None)
+        try:
+            self.store.release_lease(session_id, owner_id)
+        except (OSError, ValueError):
+            pass
 
     def __enter__(self) -> "AgentService":
         return self
