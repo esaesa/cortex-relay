@@ -59,6 +59,12 @@ class AgentStore:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=FULL")
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version > _SCHEMA_VERSION:
+                raise RuntimeError(
+                    "agent state schema is newer than this CortexRelay build: "
+                    f"{version} > {_SCHEMA_VERSION}"
+                )
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -151,12 +157,6 @@ class AgentStore:
                 ON agent_leases(expires_at);
                 """
             )
-            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-            if version > _SCHEMA_VERSION:
-                raise RuntimeError(
-                    "agent state schema is newer than this CortexRelay build: "
-                    f"{version} > {_SCHEMA_VERSION}"
-                )
             # Version 0 is the unversioned schema shipped before migrations were
             # introduced. The CREATE IF NOT EXISTS statements above make that
             # schema compatible with v1, so the first open performs an in-place
