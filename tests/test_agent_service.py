@@ -1,5 +1,6 @@
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -69,6 +70,48 @@ class SessionProvider(ProviderAdapter):
         )
 
 
+class SlowSessionProvider(SessionProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = threading.Event()
+
+    def execute_session(self, task: TaskSpec) -> TaskResult:
+        progress = task.metadata.get("_progress_line")
+        if callable(progress):
+            progress(
+                self.name,
+                json.dumps({"type": "provider.ping", "detail": "running"}),
+                "stdout",
+            )
+        self.release.wait(5)
+        return TaskResult(
+            status="success",
+            provider=self.name,
+            model=task.model,
+            summary="slow initial",
+            final_text="slow full answer",
+            conversation_id="provider-session-slow",
+        )
+
+
+class FakeProfileResolver:
+    def load(self, _workspace):
+        from cortex_relay.core.profiles import runtime_config_from_mapping
+
+        return runtime_config_from_mapping(
+            {
+                "profiles": {
+                    "writer": {
+                        "provider": "fake",
+                        "reasoning": "high",
+                        "access": "workspace_write",
+                    }
+                },
+                "roles": {"implementer": "writer"},
+            }
+        )
+
+
 class ClosedEndProvider(ProviderAdapter):
     name = "closed"
 
@@ -96,6 +139,69 @@ class ClosedEndProvider(ProviderAdapter):
 
 
 class AgentServiceTests(unittest.TestCase):
+    def test_start_async_returns_session_before_turn_finishes_and_wait_is_durable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            provider = SlowSessionProvider()
+            registry = ProviderRegistry(
+                [provider],
+                run_store=RunStore(root / "state"),
+            )
+            service = AgentService(registry)
+
+            started = service.start_async(
+                objective="inspect concurrently",
+                provider="fake",
+                workspace=workspace,
+                timeout_seconds=60,
+            )
+            session_id = started["agent_session_id"]
+
+            self.assertIn(started["status"], {"starting", "running"})
+            self.assertEqual(registry.run_store.indexed_task_ids(), [])
+            pending = service.wait(session_id, timeout_seconds=0)
+            self.assertFalse(pending["complete"])
+            self.assertIsNone(pending["result"])
+
+            provider.release.set()
+            completed = service.wait(session_id, timeout_seconds=5)
+            self.assertTrue(completed["complete"])
+            self.assertEqual(completed["status"], "idle")
+            self.assertEqual(
+                completed["result"]["final_text"],
+                "slow full answer",
+            )
+            self.assertEqual(
+                service.result(session_id)["conversation_id"],
+                "provider-session-slow",
+            )
+
+    def test_access_auto_inherits_profile_access_for_direct_agents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            provider = SessionProvider()
+            registry = ProviderRegistry(
+                [provider],
+                run_store=RunStore(root / "state"),
+                profiles=FakeProfileResolver(),
+            )
+            service = AgentService(registry)
+
+            started = service.start(
+                objective="write directly",
+                role="implementer",
+                provider="auto",
+                workspace=workspace,
+                access="auto",
+            )
+            session = service.get(started["agent_session_id"])
+            self.assertEqual(session["access"], "workspace_write")
+            self.assertEqual(session["role"], "implementer")
+
     def test_start_creates_direct_persistent_session_without_task_record(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
