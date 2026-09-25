@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
-
 from cortex_relay.core.models import TaskBudget
 from cortex_relay.runtime.progress import ProgressEvent
 
