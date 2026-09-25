@@ -3,10 +3,12 @@ from __future__ import annotations
 import subprocess
 
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 from pathlib import Path
 from datetime import datetime, timezone
 
+from cortex_relay.core.agents import AgentEvent
 from cortex_relay.core.models import TaskResult, TaskSpec
 from cortex_relay.runtime.agent_store import AgentStore
 from cortex_relay.runtime.agent_events import normalize_agent_events
@@ -17,8 +19,9 @@ from cortex_relay.providers.base import ProviderAdapter
 from cortex_relay.providers.codex import CodexAdapter
 from cortex_relay.providers.opencode import OpenCodeAdapter
 from cortex_relay.observability import RunStore, summarize_usage
+from cortex_relay.runtime.agent_store import AgentStore
 from cortex_relay.runtime.artifacts import ArtifactStore
-from cortex_relay.runtime.progress import normalize_progress
+from cortex_relay.runtime.progress import normalize_agent_events, normalize_progress
 from cortex_relay.runtime.worktree import WorktreeManager
 
 
@@ -134,6 +137,7 @@ class ProviderRegistry:
                     current_activity="Token budget exceeded; cancellation requested",
                 )
 
+        metadata["_agent_session_holder"] = agent_holder
         metadata["_progress_line"] = progress_line
         metadata["_progress_heartbeat"] = lambda pid, alive: self.run_store.record_heartbeat(
             source_workspace, task_id, pid, alive
@@ -476,6 +480,167 @@ class ProviderRegistry:
             isolate_write=isolate_write,
             metadata=metadata,
         )
+
+    def _record_agent_event(self, event: AgentEvent) -> None:
+        """Persist one semantic event and mirror provider-native child agents."""
+        try:
+            self.agent_store.record_event(event)
+        except (OSError, ValueError):
+            return
+
+        if event.kind == "provider_session":
+            provider_session_id = event.data.get("provider_session_id")
+            if isinstance(provider_session_id, str) and provider_session_id:
+                try:
+                    self.agent_store.bind_provider_session(
+                        event.session_id, provider_session_id
+                    )
+                except (OSError, ValueError):
+                    pass
+            return
+
+        if event.kind != "child_snapshot":
+            return
+        children = event.data.get("children")
+        if not isinstance(children, list):
+            return
+        try:
+            parent = self.agent_store.get(event.session_id)
+        except ValueError:
+            return
+
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            provider_session_id = child.get("provider_session_id")
+            if not isinstance(provider_session_id, str) or not provider_session_id:
+                continue
+            metadata = {
+                key: value
+                for key, value in child.items()
+                if key not in {"provider_session_id", "state", "role", "type"}
+            }
+            try:
+                child_session = self.agent_store.upsert_child(
+                    parent_session_id=event.session_id,
+                    provider_session_id=provider_session_id,
+                    provider=parent.provider,
+                    state=str(child.get("state") or "running"),
+                    role=str(child.get("role") or child.get("type") or "subagent"),
+                    model=parent.model,
+                    metadata=metadata,
+                )
+                self.agent_store.record_event(
+                    AgentEvent(
+                        session_id=child_session.session_id,
+                        kind="provider_child_state",
+                        data={
+                            "state": child.get("state"),
+                            "type": child.get("type"),
+                            **metadata,
+                        },
+                        provider_event=event.provider_event,
+                    )
+                )
+            except (OSError, ValueError):
+                continue
+
+    def _run_provider_session(
+        self, provider: ProviderAdapter, task: TaskSpec
+    ) -> TaskResult:
+        parent_session_id = task.metadata.get("_parent_agent_session_id")
+        holder = task.metadata.get("_agent_session_holder")
+        task_id = task.metadata.get("_task_id")
+        capabilities = provider.capabilities()
+        session = self.agent_store.create(
+            provider=provider.name,
+            workspace=task.workspace,
+            task_id=task_id if isinstance(task_id, str) else None,
+            model=task.model,
+            reasoning=task.reasoning,
+            access=task.access,
+            role=task.role,
+            objective=task.objective,
+            parent_session_id=(
+                parent_session_id if isinstance(parent_session_id, str) else None
+            ),
+            metadata={
+                "protocol": capabilities.session_protocol,
+                "closed_end_fallback": capabilities.closed_end_fallback,
+            },
+        )
+        if isinstance(holder, dict):
+            holder["session_id"] = session.session_id
+
+        if isinstance(task_id, str):
+            obs_workspace = Path(
+                str(task.metadata.get("_observability_workspace") or task.workspace)
+            )
+            record = self.run_store.get_task(obs_workspace, task_id) or {}
+            known = list(record.get("agent_session_ids") or [])
+            if session.session_id not in known:
+                known.append(session.session_id)
+            self.run_store.update_task(
+                obs_workspace,
+                task_id,
+                agent_session_id=session.session_id,
+                agent_session_ids=known,
+            )
+
+        effective = replace(
+            task,
+            metadata={
+                **task.metadata,
+                "_agent_session_id": session.session_id,
+            },
+        )
+
+        try:
+            self.agent_store.update(session.session_id, state="running")
+            result = self._run_provider_session(provider, effective)
+
+            if result.conversation_id:
+                self.agent_store.bind_provider_session(
+                    session.session_id, result.conversation_id
+                )
+            if result.final_text:
+                self.agent_store.add_message(
+                    session.session_id,
+                    direction="agent_to_host",
+                    content=result.final_text,
+                    sender_session_id=session.session_id,
+                    metadata={"final": True},
+                )
+            self.agent_store.record_event(
+                AgentEvent(
+                    session_id=session.session_id,
+                    kind="final",
+                    data={
+                        "status": result.status,
+                        "summary": result.summary,
+                        "provider_session_id": result.conversation_id,
+                    },
+                    provider_event="cortex",
+                )
+            )
+            self.agent_store.update(
+                session.session_id,
+                state="idle" if result.status == "success" else "failed",
+            )
+            return replace(
+                result,
+                metadata={
+                    **result.metadata,
+                    "agent_session_id": session.session_id,
+                    "session_protocol": capabilities.session_protocol,
+                },
+            )
+        except Exception:
+            try:
+                self.agent_store.update(session.session_id, state="failed")
+            except (OSError, ValueError):
+                pass
+            raise
 
     def _execute_provider(self, task: TaskSpec) -> TaskResult:
         cancel_event = task.metadata.get("_cancel_event")
