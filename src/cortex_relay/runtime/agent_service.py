@@ -242,8 +242,13 @@ class AgentService:
         cancel_event = threading.Event()
 
         def on_started(session_id: str) -> None:
-            owner_id = self._begin_lease(session_id)
             holder["session_id"] = session_id
+            try:
+                owner_id = self._begin_lease(session_id)
+            except Exception as exc:
+                holder["lease_error"] = str(exc)
+                cancel_event.set()
+                return
             holder["owner_id"] = owner_id
             with self._lock:
                 self._cancel_events[session_id] = cancel_event
@@ -282,6 +287,8 @@ class AgentService:
         if isinstance(session_id, str):
             payload["agent_session_id"] = session_id
             payload["session"] = self.store.get(session_id).to_dict()
+        if holder.get("lease_error"):
+            payload["control_error"] = holder["lease_error"]
         return payload
 
     def start_async(
@@ -315,6 +322,7 @@ class AgentService:
             except Exception as exc:
                 holder["lease_error"] = str(exc)
                 holder["session_id"] = session_id
+                cancel_event.set()
                 started.set()
                 return
             holder["session_id"] = session_id
@@ -358,6 +366,10 @@ class AgentService:
         session_id = holder["session_id"]
         lease_error = holder.get("lease_error")
         if lease_error:
+            def _cleanup_failed_start(_future: Future[Any]) -> None:
+                with self._lock:
+                    self._cancel_events.pop(session_id, None)
+            future.add_done_callback(_cleanup_failed_start)
             raise ValueError(lease_error)
         owner_id = holder.get("owner_id")
         with self._lock:
