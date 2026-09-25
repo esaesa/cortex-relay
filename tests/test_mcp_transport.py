@@ -78,9 +78,16 @@ class MCPTransportMappingTests(unittest.TestCase):
         server = create_server()
         self.assertIn("synchronous delegate", server.instructions)
         self.assertIn("Never end a turn with uncompleted async tasks", server.instructions)
-        tool = next(t for t in server._tool_manager.list_tools() if t.name == "task_wait")
-        self.assertIn("up to 30 seconds", tool.description)
-        self.assertIn("terminal status", tool.description)
+        self.assertIn("final_text", server.instructions)
+        wait_tool = next(
+            t for t in server._tool_manager.list_tools() if t.name == "task_wait"
+        )
+        self.assertIn("up to 30 seconds", wait_tool.description)
+        self.assertIn("terminal status", wait_tool.description)
+        output_tool = next(
+            t for t in server._tool_manager.list_tools() if t.name == "task_output"
+        )
+        self.assertIn("complete child final answer", output_tool.description)
 
 
 if __name__ == "__main__":
