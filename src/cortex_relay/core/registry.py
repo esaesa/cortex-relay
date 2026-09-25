@@ -601,10 +601,50 @@ class ProviderRegistry:
                 metadata={
                     "session_mode": capabilities.session_mode,
                     "persistent_sessions": False,
+                    "workflow_task": False,
                 },
             )
 
-        result = self._execute_provider(replace(task, isolate_write=False))
+        task, agent_session_id = self._start_agent_session(
+            replace(task, isolate_write=False),
+            provider,
+        )
+
+        def progress_line(
+            provider_name: str,
+            line: str,
+            stream: str = "stdout",
+        ) -> None:
+            for event in normalize_agent_events(
+                provider_name,
+                line,
+                agent_session_id,
+                stream,
+            ):
+                try:
+                    self.record_agent_event(provider_name, event)
+                except (OSError, ValueError):
+                    pass
+
+        task = replace(
+            task,
+            metadata={
+                **task.metadata,
+                "_progress_line": progress_line,
+            },
+        )
+        try:
+            result = self._finish_agent_session(
+                agent_session_id,
+                provider.execute_session(task),
+            )
+        except Exception:
+            try:
+                self.agent_store.update(agent_session_id, state="failed")
+            except (OSError, ValueError):
+                pass
+            raise
+
         return replace(
             result,
             metadata={
