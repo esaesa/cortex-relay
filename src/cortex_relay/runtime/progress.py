@@ -42,7 +42,7 @@ class ProgressEvent:
     step_index: int | None = None
 
 
-def runner_progress_kwargs(task: Any, provider: str) -> dict[str, Callable[..., None]]:
+def runner_progress_kwargs(task: Any, provider: str) -> dict[str, Any]:
     callback = task.metadata.get("_progress_line")
     heartbeat = task.metadata.get("_progress_heartbeat")
     if not callable(callback):
@@ -53,6 +53,9 @@ def runner_progress_kwargs(task: Any, provider: str) -> dict[str, Callable[..., 
     }
     if callable(heartbeat):
         callbacks["on_heartbeat"] = heartbeat
+    idle_timeout = getattr(getattr(task, "budget", None), "max_idle_seconds", None)
+    if idle_timeout is not None:
+        callbacks["idle_timeout_seconds"] = float(idle_timeout)
     return callbacks
 
 
