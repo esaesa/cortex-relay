@@ -5,8 +5,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from cortex_relay.core.agents import AgentEvent
 from cortex_relay.core.models import TaskResult, TaskSpec
 from cortex_relay.observability import RunStore, render_dashboard, summarize_usage
+from cortex_relay.runtime.agent_store import AgentStore
 
 
 class ObservabilityTests(unittest.TestCase):
@@ -118,6 +120,146 @@ class ObservabilityTests(unittest.TestCase):
             completed = store.list_sessions(workspace)
             self.assertEqual(completed[0]["status"], "success")
             self.assertEqual(completed[0]["exit_code"], 0)
+
+    def test_snapshot_includes_workspace_scoped_direct_agents_and_children(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            workspace = Path(tmp) / "repo"
+            other = Path(tmp) / "other"
+            workspace.mkdir()
+            other.mkdir()
+            store = RunStore(root)
+            agents = AgentStore(root)
+
+            parent = agents.create(
+                provider="antigravity",
+                workspace=workspace,
+                task_id=None,
+                model="gemini-3.8-flash-high",
+                reasoning="high",
+                access="workspace_write",
+                role="implementer",
+                objective="Keep frontend running",
+            )
+            agents.record_event(
+                AgentEvent(
+                    session_id=parent.session_id,
+                    kind="tool",
+                    data={"name": "powershell", "state": "running"},
+                )
+            )
+            child = agents.upsert_child(
+                parent_session_id=parent.session_id,
+                provider_session_id="native-child-1",
+                provider="antigravity",
+                state="running",
+                role="explorer",
+            )
+            idle = agents.create(
+                provider="codex",
+                workspace=workspace,
+                task_id=None,
+                model="gpt-5.6-codex",
+                reasoning="high",
+                access="read_only",
+                role="reviewer",
+                objective="Finished review",
+            )
+            agents.update(idle.session_id, state="idle")
+            foreign = agents.create(
+                provider="opencode",
+                workspace=other,
+                task_id=None,
+                model="muse",
+                reasoning="high",
+                access="read_only",
+                role="reviewer",
+                objective="Other workspace",
+            )
+            agents.update(foreign.session_id, state="running")
+
+            snapshot = store.snapshot(workspace, active_only=True)
+
+            ids = {item["session_id"] for item in snapshot["agents"]}
+            self.assertEqual(ids, {parent.session_id, child.session_id})
+            self.assertEqual(snapshot["agent_summary"]["running"], 2)
+            self.assertEqual(snapshot["agent_summary"]["idle"], 0)
+            parent_row = next(
+                item for item in snapshot["agents"]
+                if item["session_id"] == parent.session_id
+            )
+            self.assertEqual(parent_row["current_activity"], "powershell (running)")
+            self.assertTrue(parent_row["recent_events"])
+
+    def test_dashboard_renders_agents_even_when_no_workflow_tasks_exist(self):
+        snapshot = {
+            "workspace": "D:/src/project",
+            "sessions": [],
+            "summary": {
+                "active": 0,
+                "success": 0,
+                "failed": 0,
+                "total_tokens": 0,
+                "cost": None,
+            },
+            "agent_summary": {
+                "running": 2,
+                "idle": 0,
+                "failed": 0,
+                "closed": 0,
+                "total": 2,
+            },
+            "tasks": [],
+            "agents": [
+                {
+                    "session_id": "agent-parent",
+                    "state": "running",
+                    "role": "implementer",
+                    "provider": "antigravity",
+                    "model": "gemini-3.8-flash-high",
+                    "reasoning": "high",
+                    "access": "workspace_write",
+                    "objective": "Keep frontend running",
+                    "created_at": "2026-09-25T09:00:00+00:00",
+                    "provider_session_id": "provider-parent",
+                    "parent_session_id": None,
+                    "task_id": None,
+                    "current_activity": "powershell (running)",
+                    "last_event": {
+                        "sequence": 3,
+                        "at": "2026-09-25T09:01:00+00:00",
+                    },
+                    "recent_events": [],
+                },
+                {
+                    "session_id": "agent-child",
+                    "state": "running",
+                    "role": "explorer",
+                    "provider": "antigravity",
+                    "model": "gemini-3.8-flash-high",
+                    "reasoning": "high",
+                    "access": "workspace_write",
+                    "objective": "Provider-native child agent",
+                    "created_at": "2026-09-25T09:00:30+00:00",
+                    "provider_session_id": "provider-child",
+                    "parent_session_id": "agent-parent",
+                    "task_id": None,
+                    "current_activity": "child work",
+                    "last_event": None,
+                    "recent_events": [],
+                },
+            ],
+            "active_only": True,
+        }
+
+        rendered = render_dashboard(snapshot, live_only=True)
+        self.assertIn("Tasks: active 0 | success 0 | failed 0", rendered)
+        self.assertIn("Agents: running 2 | idle 0 | failed 0", rendered)
+        self.assertIn("No active workflow tasks.", rendered)
+        self.assertNotIn("No active CortexRelay requests", rendered)
+        self.assertIn("implementer → antigravity/gemini-3.8-flash-high/high", rendered)
+        self.assertIn("↳ explorer → antigravity/gemini-3.8-flash-high/high", rendered)
+        self.assertIn("Current: powershell (running)", rendered)
 
     def test_dashboard_shows_full_host_worker_route_and_metrics(self):
         snapshot = {
