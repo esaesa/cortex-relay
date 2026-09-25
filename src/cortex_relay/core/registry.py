@@ -703,11 +703,29 @@ class ProviderRegistry:
                         exc,
                     )
 
+        def progress_heartbeat(pid: int, alive: bool) -> None:
+            try:
+                self.agent_store.merge_metadata(
+                    agent_session_id,
+                    {
+                        "provider_pid": pid,
+                        "provider_process_alive": alive,
+                        "provider_heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+            except (OSError, ValueError) as exc:
+                logger.warning(
+                    "failed to persist provider heartbeat for %s: %s",
+                    agent_session_id,
+                    exc,
+                )
+
         task = replace(
             task,
             metadata={
                 **task.metadata,
                 "_progress_line": progress_line,
+                "_progress_heartbeat": progress_heartbeat,
             },
         )
         try:
