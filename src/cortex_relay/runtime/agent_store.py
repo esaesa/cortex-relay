@@ -286,7 +286,7 @@ class AgentStore:
     def _write_session(self, session: AgentSession) -> None:
         path = self._session_path(session.session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temp = path.with_suffix(".tmp")
+        temp = path.with_suffix(path.suffix + f".{uuid4().hex}.tmp")
         temp.write_text(
             json.dumps(session.to_dict(), ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
