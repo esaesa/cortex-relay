@@ -37,6 +37,28 @@ class AgentEventNormalizationTests(unittest.TestCase):
         self.assertEqual(child.data["provider_session_id"], "child-123")
         self.assertEqual(child.data["log_uri"], "file:///tmp/child.log")
 
+    def test_antigravity_manage_task_without_child_id_is_flagged(self):
+        event = {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 4,
+                "step_type": "tool",
+                "tool_name": "manage_task",
+                "state": "RUNNING",
+                "tool_info": {
+                    "parameters": {"action": "spawn", "role": "explorer"},
+                },
+            },
+        }
+        normalized = normalize_agent_events(
+            "antigravity",
+            json.dumps(event),
+            "agent-root",
+        )
+        self.assertTrue(any(item.kind == "tool" for item in normalized))
+        untracked = next(item for item in normalized if item.kind == "untracked_child")
+        self.assertEqual(untracked.data["tool"], "manage_task")
+
     def test_codex_app_server_delta_is_preserved(self):
         event = {
             "method": "item/agentMessage/delta",
@@ -84,6 +106,29 @@ class AgentEventNormalizationTests(unittest.TestCase):
         child = next(item for item in normalized if item.kind == "child_update")
         self.assertEqual(child.data["provider_session_id"], "child-thread")
         self.assertEqual(child.data["metadata"]["sender_thread_id"], "parent-thread")
+
+    def test_opencode_task_without_session_id_is_flagged(self):
+        event = {
+            "type": "tool",
+            "sessionID": "parent-session",
+            "part": {
+                "type": "tool",
+                "tool": "task",
+                "state": {
+                    "status": "running",
+                    "input": {"subagent_type": "explore"},
+                    "metadata": {},
+                    "output": "starting",
+                },
+            },
+        }
+        normalized = normalize_agent_events(
+            "opencode",
+            json.dumps(event),
+            "agent-root",
+        )
+        untracked = next(item for item in normalized if item.kind == "untracked_child")
+        self.assertEqual(untracked.data["tool"], "task")
 
     def test_opencode_task_tool_child_is_preserved(self):
         event = {

@@ -111,14 +111,16 @@ def _antigravity(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ..
 
     if step_type == "tool":
         info = _dict(step.get("tool_info"))
+        tool_name = _text(step.get("tool_name") or info.get("name"))
+        parameters = info.get("parameters")
         out.append(
             _event(
                 session_id,
                 "tool",
                 {
-                    "name": step.get("tool_name") or info.get("name"),
+                    "name": tool_name,
                     "state": step.get("state"),
-                    "parameters": info.get("parameters"),
+                    "parameters": parameters,
                     "output": info.get("output"),
                     "error": info.get("error"),
                     "step_index": step.get("step_index"),
@@ -126,6 +128,22 @@ def _antigravity(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ..
                 "step_update",
             )
         )
+        if (
+            _looks_like_child_tool(tool_name, parameters)
+            and not any(item.kind == "child_update" for item in out)
+        ):
+            out.append(
+                _event(
+                    session_id,
+                    "untracked_child",
+                    {
+                        "tool": tool_name,
+                        "parameters": parameters,
+                        "reason": "provider emitted child-management activity without a child session identifier",
+                    },
+                    "step_update",
+                )
+            )
     return tuple(out)
 
 
@@ -357,7 +375,53 @@ def _opencode(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ...]:
                         kind,
                     )
                 )
+            else:
+                out.append(
+                    _event(
+                        session_id,
+                        "untracked_child",
+                        {
+                            "tool": tool,
+                            "parameters": state.get("input"),
+                            "reason": "OpenCode task tool did not expose a child session identifier",
+                        },
+                        kind,
+                    )
+                )
     return tuple(out)
+
+
+def _looks_like_child_tool(name: str | None, parameters: Any) -> bool:
+    if not name:
+        return False
+    normalized = name.strip().lower().replace("-", "_")
+    if normalized not in {
+        "manage_task",
+        "task",
+        "spawn_agent",
+        "create_subagent",
+        "create_sub_agent",
+    }:
+        return False
+    if normalized != "manage_task":
+        return True
+    params = _dict(parameters)
+    action = _text(
+        params.get("action")
+        or params.get("operation")
+        or params.get("command")
+        or params.get("mode")
+    )
+    if action is None:
+        return True
+    return action.strip().lower() in {
+        "create",
+        "spawn",
+        "start",
+        "run",
+        "delegate",
+        "launch",
+    }
 
 
 def _agy_children(value: Any) -> tuple[dict[str, Any], ...]:

@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -351,6 +352,42 @@ class ObservabilityTests(unittest.TestCase):
         )
         self.assertEqual(codex["total_tokens"], 125)
 
+
+    def test_async_task_index_and_record_are_consistent_during_updates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            workspace = Path(tmp) / "repo"
+            workspace.mkdir()
+            store = RunStore(root)
+            task_id = store.start_task(
+                TaskSpec(objective="race", workspace=workspace),
+                async_task=True,
+                owner_instance_id="owner-a",
+            )
+
+            def update_records() -> None:
+                for index in range(40):
+                    store.update_task(
+                        workspace,
+                        task_id,
+                        current_activity=f"update-{index}",
+                    )
+
+            def resolve_records() -> None:
+                for _ in range(80):
+                    resolved_workspace, record = store.find_task(task_id)
+                    self.assertEqual(resolved_workspace, workspace.resolve())
+                    self.assertEqual(record["task_id"], task_id)
+                    self.assertEqual(record["workspace"], str(workspace.resolve()))
+
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                futures = [
+                    pool.submit(update_records),
+                    pool.submit(resolve_records),
+                    pool.submit(resolve_records),
+                ]
+                for future in futures:
+                    future.result()
 
     def test_clear_completed_keeps_active_tasks(self):
         with tempfile.TemporaryDirectory() as tmp:

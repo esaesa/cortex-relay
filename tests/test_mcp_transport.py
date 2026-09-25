@@ -83,7 +83,7 @@ class MCPTransportMappingTests(unittest.TestCase):
             raise
         self.assertIn("cross-provider agent control plane", server.instructions)
         self.assertIn("persistent provider-native agent sessions", server.instructions)
-        self.assertIn("Use agent_start for direct resumable specialists", server.instructions)
+        self.assertIn("agent_start_async for parallel direct specialists", server.instructions)
         self.assertIn("closed-end execution", server.instructions)
         self.assertIn("provider-native child", server.instructions)
         self.assertIn("complete worker final result is authoritative", server.instructions)
@@ -131,6 +131,14 @@ class MCPTransportMappingTests(unittest.TestCase):
             t for t in server._tool_manager.list_tools() if t.name == "agent_events"
         )
         self.assertIn("semantic agent events", agent_events_tool.description)
+        agent_messages_tool = next(
+            t for t in server._tool_manager.list_tools() if t.name == "agent_messages"
+        )
+        self.assertIn("monotonic sequence cursor", agent_messages_tool.description)
+        agent_cancel_tool = next(
+            t for t in server._tool_manager.list_tools() if t.name == "agent_cancel"
+        )
+        self.assertIn("provider-backed cancellation", agent_cancel_tool.description)
         agent_send_tool = next(
             t for t in server._tool_manager.list_tools() if t.name == "agent_send"
         )

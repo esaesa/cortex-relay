@@ -128,7 +128,23 @@ State is deliberately kept outside the project checkout:
 
 Override with `CORTEX_RELAY_STATE_DIR`.
 
-Observability persistence is best-effort and cannot make execution fail. Completed task history can be removed with:
+### Direct-agent durability and recovery
+
+Persistent agent sessions use a transactional SQLite/WAL store under the CortexRelay state directory. Sessions, provider-native handles, parent/root links, events, messages, results, and direct-turn leases are indexed tables rather than independently scanned JSON/JSONL files.
+
+Operational guarantees for direct sessions:
+- event and message sequence cursors are monotonic and allocated transactionally;
+- `agent_events(after_sequence=...)` and `agent_messages(after_sequence=...)` perform bounded indexed reads;
+- only one direct turn owner may hold a live session lease at a time;
+- the owner renews its lease while work is active;
+- a new runtime reconciles expired active leases to `interrupted` and emits a diagnostic event;
+- `agent_cancel` reaches the provider process/app-server when the current runtime owns the turn;
+- `agent_close` rejects active sessions, and `agent_send` requires an idle session;
+- provider-native child activity without a correlatable child session ID is persisted as `untracked_child` and flags the parent session instead of disappearing.
+
+The SQLite/WAL backend is intended for a robust single-host deployment. It must not be treated as a shared multi-replica database over a network filesystem; that topology requires an external transactional AgentStore backend.
+
+Task-oriented observability remains defensive. Agent-session persistence is stronger: it is required control-plane state for persistent sessions and must be writable so leases, cursors, provider handles, child topology, cancellation ownership, and completed-turn results remain coherent. Completed task history can be removed with:
 
 ```bash
 cortex-relay history --clear

@@ -17,6 +17,7 @@ def create_server(
     registry: ProviderRegistry | None = None,
     *,
     async_tasks: TaskControl | None = None,
+    agent_control: AgentService | None = None,
 ) -> Any:
     """Create the optional MCP v2 server without importing MCP at package import time."""
 
@@ -33,7 +34,7 @@ def create_server(
 
     runtime = registry or default_registry()
     async_tasks = async_tasks or TaskService(runtime)
-    agent_control = AgentService(runtime)
+    agent_control = agent_control or AgentService(runtime)
     server = MCPServer(
         "CortexRelay",
         instructions=(
@@ -476,10 +477,15 @@ def create_server(
     @server.tool()
     def agent_messages(
         session_id: str,
+        after_sequence: int = 0,
         limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Return durable host/agent messages for one session."""
-        return agent_control.messages(session_id, limit=limit)
+    ) -> dict[str, Any]:
+        """Return durable host/agent messages using a monotonic sequence cursor."""
+        return agent_control.messages(
+            session_id,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
 
     @server.tool()
     def agent_children(session_id: str) -> list[dict[str, Any]]:
@@ -500,6 +506,17 @@ def create_server(
         )
 
     @server.tool()
+    def agent_cancel(session_id: str) -> dict[str, Any]:
+        """Request provider-backed cancellation of the active direct agent turn.
+
+        Cancellation is delivered to the owning provider process/app-server when
+        this CortexRelay runtime owns the turn. After a runtime restart, the
+        cancellation intent is persisted and lease expiry/reconciliation prevents
+        the session from remaining a zombie indefinitely.
+        """
+        return agent_control.cancel(session_id)
+
+    @server.tool()
     def agent_close(session_id: str) -> dict[str, Any]:
         """Close the CortexRelay handle for an agent session."""
         return agent_control.close(session_id)
@@ -516,7 +533,12 @@ def run_mcp(
 ) -> None:
     runtime = registry or default_registry()
     async_tasks = TaskService(runtime)
-    server = create_server(runtime, async_tasks=async_tasks)
+    agent_control = AgentService(runtime)
+    server = create_server(
+        runtime,
+        async_tasks=async_tasks,
+        agent_control=agent_control,
+    )
     try:
         if transport == "stdio":
             server.run("stdio")
@@ -525,6 +547,7 @@ def run_mcp(
         else:
             raise ValueError(f"unsupported MCP transport: {transport}")
     finally:
+        agent_control.shutdown()
         async_tasks.shutdown()
 
 

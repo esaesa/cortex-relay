@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import subprocess
 
 from dataclasses import replace
@@ -20,6 +21,9 @@ from cortex_relay.observability import RunStore, summarize_usage
 from cortex_relay.runtime.artifacts import ArtifactStore
 from cortex_relay.runtime.progress import normalize_progress
 from cortex_relay.runtime.worktree import WorktreeManager
+
+
+logger = logging.getLogger(__name__)
 
 
 class ProviderRegistry:
@@ -187,8 +191,12 @@ class ProviderRegistry:
                 ):
                     try:
                         self.record_agent_event(provider, agent_event)
-                    except (OSError, ValueError):
-                        pass
+                    except (OSError, ValueError) as exc:
+                        logger.warning(
+                            "failed to persist agent event for %s: %s",
+                            agent_session_id,
+                            exc,
+                        )
 
             event = normalize_progress(provider, line, task_id, stream)
             if event is None:
@@ -346,6 +354,24 @@ class ProviderRegistry:
                         if key not in {"provider_session_id", "state", "role"}
                     },
                 )
+        elif kind == "untracked_child":
+            session = self.agent_store.get(event.session_id)
+            metadata = dict(session.metadata)
+            metadata["untracked_native_work"] = True
+            metadata["untracked_native_work_count"] = (
+                int(metadata.get("untracked_native_work_count") or 0) + 1
+            )
+            metadata["last_untracked_native_work"] = {
+                "provider": provider,
+                "event": event.provider_event,
+                "data": data,
+                "sequence": saved.get("sequence"),
+            }
+            self.agent_store.update(event.session_id, metadata=metadata)
+            logger.warning(
+                "provider-native child activity could not be correlated for session %s",
+                event.session_id,
+            )
         elif kind == "message":
             text = data.get("text")
             if isinstance(text, str) and text:
@@ -456,16 +482,41 @@ class ProviderRegistry:
             self.agent_store.save_result(session_id, finalized.to_dict())
             self.agent_store.update(
                 session_id,
-                state="idle" if finalized.status == "success" else "failed",
+                state=(
+                    "idle"
+                    if finalized.status == "success"
+                    else (
+                        "interrupted"
+                        if finalized.status in {"cancelled", "timeout"}
+                        else "failed"
+                    )
+                ),
             )
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "failed to persist complete agent result for %s before terminal state: %s",
+                session_id,
+                exc,
+            )
             try:
                 self.agent_store.update(
                     session_id,
-                    state="idle" if finalized.status == "success" else "failed",
+                    state=(
+                        "idle"
+                        if finalized.status == "success"
+                        else (
+                            "interrupted"
+                            if finalized.status in {"cancelled", "timeout"}
+                            else "failed"
+                        )
+                    ),
                 )
-            except (OSError, ValueError):
-                pass
+            except (OSError, ValueError) as state_exc:
+                logger.error(
+                    "failed to publish terminal agent state for %s: %s",
+                    session_id,
+                    state_exc,
+                )
         return finalized
 
     def _observe(self, task: TaskSpec, **updates: Any) -> None:
@@ -645,14 +696,36 @@ class ProviderRegistry:
             ):
                 try:
                     self.record_agent_event(provider_name, event)
-                except (OSError, ValueError):
-                    pass
+                except (OSError, ValueError) as exc:
+                    logger.warning(
+                        "failed to persist direct agent event for %s: %s",
+                        agent_session_id,
+                        exc,
+                    )
+
+        def progress_heartbeat(pid: int, alive: bool) -> None:
+            try:
+                self.agent_store.merge_metadata(
+                    agent_session_id,
+                    {
+                        "provider_pid": pid,
+                        "provider_process_alive": alive,
+                        "provider_heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+            except (OSError, ValueError) as exc:
+                logger.warning(
+                    "failed to persist provider heartbeat for %s: %s",
+                    agent_session_id,
+                    exc,
+                )
 
         task = replace(
             task,
             metadata={
                 **task.metadata,
                 "_progress_line": progress_line,
+                "_progress_heartbeat": progress_heartbeat,
             },
         )
         try:

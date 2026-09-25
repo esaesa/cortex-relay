@@ -94,6 +94,37 @@ class SlowSessionProvider(SessionProvider):
         )
 
 
+class CancellableSessionProvider(SessionProvider):
+    def execute_session(self, task: TaskSpec) -> TaskResult:
+        cancel_event = task.metadata.get("_cancel_event")
+        progress = task.metadata.get("_progress_line")
+        if callable(progress):
+            progress(
+                self.name,
+                json.dumps({"type": "provider.ping", "detail": "cancellable"}),
+                "stdout",
+            )
+        for _ in range(200):
+            if cancel_event is not None and cancel_event.is_set():
+                return TaskResult(
+                    status="cancelled",
+                    provider=self.name,
+                    model=task.model,
+                    summary="cancelled",
+                    final_text="",
+                    conversation_id="provider-session-cancelled",
+                )
+            threading.Event().wait(0.01)
+        return TaskResult(
+            status="success",
+            provider=self.name,
+            model=task.model,
+            summary="completed",
+            final_text="completed",
+            conversation_id="provider-session-cancelled",
+        )
+
+
 class FakeProfileResolver:
     def load(self, _workspace):
         from cortex_relay.core.profiles import runtime_config_from_mapping
@@ -205,6 +236,7 @@ class AgentServiceTests(unittest.TestCase):
                 profiles=FallbackProfileResolver(),
             )
             service = AgentService(registry)
+            self.addCleanup(service.shutdown)
 
             result = service.start(
                 objective="inspect",
@@ -345,9 +377,13 @@ class AgentServiceTests(unittest.TestCase):
             self.assertEqual(registry.run_store.indexed_task_ids(), [])
 
             messages = service.messages(session_id)
-            self.assertEqual(messages[0]["direction"], "host_to_agent")
-            self.assertEqual(messages[0]["content"], "inspect")
-            self.assertEqual(messages[-1]["direction"], "agent_to_host")
+            self.assertEqual(messages["messages"][0]["direction"], "host_to_agent")
+            self.assertEqual(messages["messages"][0]["content"], "inspect")
+            self.assertEqual(messages["messages"][-1]["direction"], "agent_to_host")
+            cursor = messages["messages"][0]["sequence"]
+            incremental = service.messages(session_id, after_sequence=cursor)
+            self.assertEqual(len(incremental["messages"]), 1)
+            self.assertEqual(incremental["messages"][0]["direction"], "agent_to_host")
 
             events = service.events(session_id)["events"]
             self.assertTrue(events)
@@ -375,6 +411,70 @@ class AgentServiceTests(unittest.TestCase):
             self.assertIn("delegate/delegate_async", started["error"])
             self.assertNotIn("agent_session_id", started)
             self.assertEqual(registry.run_store.indexed_task_ids(), [])
+
+    def test_cancel_interrupts_active_provider_turn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            provider = CancellableSessionProvider()
+            registry = ProviderRegistry(
+                [provider],
+                run_store=RunStore(root / "state"),
+            )
+            service = AgentService(
+                registry,
+                lease_ttl_seconds=2,
+                lease_heartbeat_seconds=0.2,
+            )
+            self.addCleanup(service.shutdown)
+
+            started = service.start_async(
+                objective="long turn",
+                provider="fake",
+                workspace=workspace,
+                timeout_seconds=30,
+            )
+            session_id = started["agent_session_id"]
+            cancelled = service.cancel(session_id)
+            self.assertTrue(cancelled["cancel_requested"])
+            self.assertTrue(cancelled["delivered"])
+
+            completed = service.wait(session_id, timeout_seconds=5)
+            self.assertTrue(completed["complete"])
+            self.assertEqual(completed["status"], "interrupted")
+            self.assertEqual(completed["result"]["status"], "cancelled")
+            self.assertIsNone(service.store.lease(session_id))
+
+    def test_close_rejects_active_turn_and_send_rejects_closed_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            provider = SlowSessionProvider()
+            registry = ProviderRegistry(
+                [provider],
+                run_store=RunStore(root / "state"),
+            )
+            service = AgentService(registry)
+            self.addCleanup(service.shutdown)
+
+            started = service.start_async(
+                objective="hold open",
+                provider="fake",
+                workspace=workspace,
+                timeout_seconds=30,
+            )
+            session_id = started["agent_session_id"]
+            with self.assertRaisesRegex(ValueError, "active turn"):
+                service.close(session_id)
+
+            provider.release.set()
+            self.assertTrue(service.wait(session_id, timeout_seconds=5)["complete"])
+            closed = service.close(session_id)
+            self.assertEqual(closed["state"], "closed")
+            with self.assertRaisesRegex(ValueError, "follow-up messages require an idle session"):
+                service.send(session_id, "should fail")
 
     def test_followup_reuses_provider_session(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -418,8 +518,8 @@ class AgentServiceTests(unittest.TestCase):
                 [("provider-session-1", "go deeper")],
             )
             messages = service.messages(session_id)
-            self.assertEqual(messages[-2]["direction"], "host_to_agent")
-            self.assertEqual(messages[-1]["direction"], "agent_to_host")
+            self.assertEqual(messages["messages"][-2]["direction"], "host_to_agent")
+            self.assertEqual(messages["messages"][-1]["direction"], "agent_to_host")
 
 
 if __name__ == "__main__":
