@@ -137,6 +137,14 @@ class TaskService:
             _prestarted=True,
             _cancel_event=cancel_event,
         )
+        if parent_task_id is not None:
+            try:
+                parent_record = self._resolve(parent_task_id)[1]
+            except (OSError, ValueError):
+                parent_record = {}
+            parent_agent_session_id = parent_record.get("agent_session_id")
+            if isinstance(parent_agent_session_id, str):
+                metadata["_parent_agent_session_id"] = parent_agent_session_id
         prepared = replace(task, metadata=metadata)
 
         with self._lock:
