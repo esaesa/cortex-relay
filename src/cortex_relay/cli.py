@@ -270,12 +270,23 @@ def _doctor(provider: str, scope: str, project_dir: Path, *, runtime_only: bool)
 
     print("CortexRelay diagnostics:")
     for check in [*config, *runtime]:
-        marker = "OK" if check.ok else ("MISSING" if check.name.startswith("config:") else "OPTIONAL")
+        if check.ok:
+            marker = "OK"
+        elif check.name.startswith("config:"):
+            marker = "MISSING"
+        elif check.name.startswith("state:"):
+            marker = "FAIL"
+        else:
+            marker = "OPTIONAL"
         print(f"  {marker:<8} {check.name}: {check.detail}")
 
+    state_checks = [check for check in runtime if check.name.startswith("state:")]
+    provider_checks = [check for check in runtime if check.name.startswith("runtime:")]
+    state_ok = all(check.ok for check in state_checks)
+    provider_ok = any(check.ok for check in provider_checks)
     if runtime_only:
-        return 0 if runtime and any(check.ok for check in runtime) else 1
-    return 0 if all(check.ok for check in config) else 1
+        return 0 if state_ok and provider_ok else 1
+    return 0 if state_ok and all(check.ok for check in config) else 1
 
 
 def _providers() -> int:
