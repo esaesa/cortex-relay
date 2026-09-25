@@ -143,6 +143,7 @@ class CodexAdapter(ProviderAdapter):
             cwd=task.workspace,
             timeout_seconds=task.timeout_seconds + 15,
             on_event=on_event,
+            cancel_event=cancel_event if hasattr(cancel_event, "is_set") else None,
         )
         try:
             turn = client.run_turn(
@@ -152,6 +153,17 @@ class CodexAdapter(ProviderAdapter):
                 reasoning=task.reasoning,
                 sandbox="read-only" if task.access == "read_only" else "workspace-write",
                 output_schema=RESULT_SCHEMA,
+            )
+        except ProcessCancelledError:
+            return TaskResult(
+                status="cancelled",
+                provider=self.name,
+                model=task.model,
+                summary="Codex session turn was cancelled.",
+                error="provider session cancelled",
+                conversation_id=provider_session_id,
+                duration_seconds=time.monotonic() - started,
+                metadata={"transport": "app-server"},
             )
         except subprocess.TimeoutExpired:
             return TaskResult(
