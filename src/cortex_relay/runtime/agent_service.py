@@ -842,7 +842,8 @@ class AgentService:
                 },
             )
             try:
-                result = provider.continue_session(
+                result = self.registry.continue_provider_session(
+                    provider,
                     task,
                     session.provider_session_id,
                 )
