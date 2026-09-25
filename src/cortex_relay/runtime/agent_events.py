@@ -386,15 +386,50 @@ def _agy_children(value: Any) -> tuple[dict[str, Any], ...]:
 
 def _codex_child(item: dict[str, Any]) -> dict[str, Any] | None:
     item_type = str(item.get("type") or "")
+    if item_type in {"subAgentActivity", "sub_agent_activity"}:
+        provider_id = _text(item.get("agentThreadId") or item.get("agent_thread_id"))
+        if provider_id:
+            kind = _text(item.get("kind")) or "interacted"
+            return {
+                "provider_session_id": provider_id,
+                "role": "subagent",
+                "state": "idle" if kind == "completed" else (
+                    "failed" if kind == "interrupted" else "running"
+                ),
+                "metadata": {
+                    "activity_kind": kind,
+                    "agent_path": item.get("agentPath") or item.get("agent_path"),
+                },
+            }
+
     if item_type in {"collab_tool_call", "collabAgentToolCall"}:
         states = _dict(item.get("agents_states") or item.get("agentsStates"))
+        receivers = item.get("receiverThreadIds") or item.get("receiver_thread_ids")
+        receiver_ids = [
+            str(value)
+            for value in (receivers if isinstance(receivers, list) else [])
+            if isinstance(value, str) and value.strip()
+        ]
+        provider_id: str | None = None
+        state: Any = "running"
         if states:
             provider_id, state = next(iter(states.items()))
+        elif receiver_ids:
+            provider_id = receiver_ids[0]
+        if provider_id:
+            tool = _text(item.get("tool")) or "collab"
             return {
                 "provider_session_id": str(provider_id),
                 "role": "subagent",
                 "state": str(state),
-                "metadata": {"agents_states": states},
+                "metadata": {
+                    "tool": tool,
+                    "sender_thread_id": item.get("senderThreadId") or item.get("sender_thread_id"),
+                    "receiver_thread_ids": receiver_ids,
+                    "model": item.get("model"),
+                    "reasoning_effort": item.get("reasoningEffort") or item.get("reasoning_effort"),
+                    "agents_states": states,
+                },
             }
     if item_type in {"create_subagent_call", "createSubagentCall"}:
         provider_id = _text(item.get("agent_id") or item.get("agentId"))
