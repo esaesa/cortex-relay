@@ -13,10 +13,15 @@ from pathlib import Path
 from typing import Any
 
 from cortex_relay.core.models import Evidence, TaskResult, TaskSpec
-from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner, prepare_process_argv
+from cortex_relay.runtime.process import (
+    ProcessCancelledError,
+    ProcessIdleTimeoutError,
+    ProcessRunner,
+    prepare_process_argv,
+)
 from cortex_relay.runtime.progress import runner_progress_kwargs
 
-from .base import ProviderAdapter, ProviderCapabilities
+from .base import ProviderAdapter, ProviderCapabilities, task_execution_constraints
 from .result_schema import RESULT_SCHEMA
 
 
@@ -278,6 +283,17 @@ class OpenCodeAdapter(ProviderAdapter):
                 model=task.model,
                 summary="OpenCode task was cancelled.",
                 error="provider process cancelled",
+                termination_reason="cancelled",
+                duration_seconds=time.monotonic() - started,
+            )
+        except ProcessIdleTimeoutError as exc:
+            return TaskResult(
+                status="timeout",
+                provider=self.name,
+                model=task.model,
+                summary="OpenCode task stalled without provider progress.",
+                error=f"idle timeout after {exc.idle_timeout_seconds:g} seconds",
+                termination_reason="idle_timeout",
                 duration_seconds=time.monotonic() - started,
             )
         except subprocess.TimeoutExpired:
@@ -287,6 +303,7 @@ class OpenCodeAdapter(ProviderAdapter):
                 model=task.model,
                 summary="OpenCode task timed out.",
                 error=f"timeout after {task.timeout_seconds} seconds",
+                termination_reason="execution_timeout",
                 duration_seconds=time.monotonic() - started,
             )
 
@@ -502,6 +519,7 @@ class OpenCodeAdapter(ProviderAdapter):
             f"{access_instruction}\n\n"
             "Acceptance criteria:\n"
             f"{criteria}\n\n"
+            f"{task_execution_constraints(task)}\n\n"
             "Return one JSON object and no markdown fences. Put a compact synopsis in summary, "
             "but put your COMPLETE answer to the parent in final_text. Do not shorten final_text "
             "merely to fit the summary; it must preserve all material findings, reasoning conclusions, "

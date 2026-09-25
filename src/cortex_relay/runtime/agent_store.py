@@ -506,15 +506,15 @@ class AgentStore:
                         at,
                     ),
                 )
-                if exists["state"] == "starting":
-                    conn.execute(
-                        """
-                        UPDATE agent_sessions
-                        SET state = 'running', updated_at = ?
-                        WHERE session_id = ?
-                        """,
-                        (at, event.session_id),
-                    )
+                conn.execute(
+                    """
+                    UPDATE agent_sessions
+                    SET state = CASE WHEN state = 'starting' THEN 'running' ELSE state END,
+                        updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (at, event.session_id),
+                )
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
@@ -854,6 +854,7 @@ class AgentStore:
                     metadata = {
                         **metadata,
                         "interrupted_reason": "agent lease expired",
+                        "termination_reason": "lease_expired",
                         "interrupted_at": stamp,
                     }
                     conn.execute(

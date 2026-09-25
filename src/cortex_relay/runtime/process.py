@@ -16,6 +16,14 @@ class ProcessCancelledError(RuntimeError):
     """Raised when a delegated provider process is cancelled."""
 
 
+class ProcessIdleTimeoutError(subprocess.TimeoutExpired):
+    """Raised when a provider process stays alive but produces no progress."""
+
+    def __init__(self, cmd: Sequence[str], timeout: float) -> None:
+        super().__init__(cmd, timeout)
+        self.idle_timeout_seconds = timeout
+
+
 @dataclass(frozen=True)
 class ProcessResult:
     argv: tuple[str, ...]
@@ -104,6 +112,7 @@ class ProcessRunner:
         on_stdout_line: Callable[[str], None] | None = None,
         on_stderr_line: Callable[[str], None] | None = None,
         on_heartbeat: Callable[[int, bool], None] | None = None,
+        idle_timeout_seconds: float | None = None,
     ) -> ProcessResult:
         original_argv = list(argv)
         process_argv = prepare_process_argv(original_argv)
@@ -129,6 +138,7 @@ class ProcessRunner:
             on_stdout_line,
             on_stderr_line,
             on_heartbeat,
+            idle_timeout_seconds,
         )
 
     def _stream(
@@ -141,6 +151,7 @@ class ProcessRunner:
         on_stdout_line: Callable[[str], None] | None,
         on_stderr_line: Callable[[str], None] | None,
         on_heartbeat: Callable[[int, bool], None] | None,
+        idle_timeout_seconds: float | None,
     ) -> ProcessResult:
         events: queue.Queue[tuple[str, str | None]] = queue.Queue()
         output: dict[str, list[str]] = {"stdout": [], "stderr": []}
@@ -171,6 +182,9 @@ class ProcessRunner:
         finished = 0
         exited_at: float | None = None
         last_heartbeat = time.monotonic()
+        last_progress = started
+        if idle_timeout_seconds is not None and idle_timeout_seconds <= 0:
+            raise ValueError("idle_timeout_seconds must be positive")
         try:
             while finished < 2:
                 if time.monotonic() - last_heartbeat >= 5:
@@ -178,6 +192,11 @@ class ProcessRunner:
                     last_heartbeat = time.monotonic()
                 if cancel_event is not None and cancel_event.is_set():
                     raise ProcessCancelledError("provider process cancelled")
+                if (
+                    idle_timeout_seconds is not None
+                    and time.monotonic() - last_progress >= idle_timeout_seconds
+                ):
+                    raise ProcessIdleTimeoutError(argv, idle_timeout_seconds)
                 remaining = timeout_seconds - (time.monotonic() - started)
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(argv, timeout_seconds)
@@ -194,6 +213,7 @@ class ProcessRunner:
                     finished += 1
                     continue
                 output[name].append(line)
+                last_progress = time.monotonic()
                 callback = on_stdout_line if name == "stdout" else on_stderr_line
                 if callback is not None:
                     try:
@@ -207,6 +227,11 @@ class ProcessRunner:
                     last_heartbeat = time.monotonic()
                 if cancel_event is not None and cancel_event.is_set():
                     raise ProcessCancelledError("provider process cancelled")
+                if (
+                    idle_timeout_seconds is not None
+                    and time.monotonic() - last_progress >= idle_timeout_seconds
+                ):
+                    raise ProcessIdleTimeoutError(argv, idle_timeout_seconds)
                 remaining = timeout_seconds - (time.monotonic() - started)
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(argv, timeout_seconds)

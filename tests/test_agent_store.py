@@ -214,6 +214,7 @@ class AgentStoreTests(unittest.TestCase):
             reconciled = store.get(session.session_id)
             self.assertEqual(reconciled.state, "interrupted")
             self.assertIn("lease expired", reconciled.metadata["interrupted_reason"])
+            self.assertEqual(reconciled.metadata["termination_reason"], "lease_expired")
             events = store.events(session.session_id)["events"]
             self.assertEqual(events[-1]["provider_event"], "lease_expired")
 

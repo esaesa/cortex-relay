@@ -56,15 +56,37 @@ class DelegationContext:
 class TaskBudget:
     max_tokens: int | None = None
     max_cost: float | None = None
+    max_tool_calls: int | None = None
+    max_repeated_calls: int | None = None
+    max_idle_seconds: int | None = None
+    max_runtime_seconds: int | None = None
+    max_child_agents: int | None = None
 
     def __post_init__(self) -> None:
         if self.max_tokens is not None and self.max_tokens < 1:
             raise ValueError("max_tokens must be positive")
         if self.max_cost is not None and self.max_cost < 0:
             raise ValueError("max_cost must be non-negative")
+        for name, value in (
+            ("max_tool_calls", self.max_tool_calls),
+            ("max_repeated_calls", self.max_repeated_calls),
+            ("max_idle_seconds", self.max_idle_seconds),
+            ("max_runtime_seconds", self.max_runtime_seconds),
+            ("max_child_agents", self.max_child_agents),
+        ):
+            if value is not None and value < 1:
+                raise ValueError(f"{name} must be positive")
 
     def to_dict(self) -> dict[str, Any]:
-        return {"max_tokens": self.max_tokens, "max_cost": self.max_cost}
+        return {
+            "max_tokens": self.max_tokens,
+            "max_cost": self.max_cost,
+            "max_tool_calls": self.max_tool_calls,
+            "max_repeated_calls": self.max_repeated_calls,
+            "max_idle_seconds": self.max_idle_seconds,
+            "max_runtime_seconds": self.max_runtime_seconds,
+            "max_child_agents": self.max_child_agents,
+        }
 
 
 @dataclass(frozen=True)
@@ -209,6 +231,7 @@ class TaskResult:
     model: str | None = None
     conversation_id: str | None = None
     error: str | None = None
+    termination_reason: str | None = None
     duration_seconds: float | None = None
     usage: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -231,6 +254,7 @@ class TaskResult:
             "model": self.model,
             "conversation_id": self.conversation_id,
             "error": self.error,
+            "termination_reason": self.termination_reason,
             "duration_seconds": self.duration_seconds,
             "usage": self.usage,
             "metadata": self.metadata,

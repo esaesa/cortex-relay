@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from cortex_relay.runtime.process import ProcessCancelledError, prepare_process_argv
+from cortex_relay.runtime.process import (
+    ProcessCancelledError,
+    ProcessIdleTimeoutError,
+    prepare_process_argv,
+)
 
 
 class CodexAppServerError(RuntimeError):
@@ -45,12 +49,17 @@ class CodexAppServerClient:
         timeout_seconds: int,
         on_event: Callable[[str], None] | None = None,
         cancel_event: threading.Event | None = None,
+        idle_timeout_seconds: float | None = None,
     ) -> None:
         self.binary = binary
         self.cwd = cwd
         self.timeout_seconds = timeout_seconds
         self.on_event = on_event
         self.cancel_event = cancel_event
+        self.idle_timeout_seconds = idle_timeout_seconds
+        if self.idle_timeout_seconds is not None and self.idle_timeout_seconds <= 0:
+            raise ValueError("idle_timeout_seconds must be positive")
+        self._last_progress = time.monotonic()
         self._process: subprocess.Popen[str] | None = None
         self._stdout_queue: queue.Queue[str | BaseException | None] = queue.Queue()
         self._stderr: list[str] = []
@@ -69,6 +78,7 @@ class CodexAppServerClient:
         output_schema: dict[str, Any],
     ) -> CodexTurnResult:
         deadline = time.monotonic() + self.timeout_seconds
+        self._last_progress = time.monotonic()
         self._start()
         try:
             self._request(
@@ -315,6 +325,14 @@ class CodexAppServerClient:
         while True:
             if self.cancel_event is not None and self.cancel_event.is_set():
                 raise ProcessCancelledError("provider session cancelled")
+            if (
+                self.idle_timeout_seconds is not None
+                and time.monotonic() - self._last_progress >= self.idle_timeout_seconds
+            ):
+                raise ProcessIdleTimeoutError(
+                    [self.binary, "app-server"],
+                    self.idle_timeout_seconds,
+                )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(
@@ -335,6 +353,7 @@ class CodexAppServerClient:
         line = item.strip()
         if not line:
             return {}
+        self._last_progress = time.monotonic()
         try:
             value = json.loads(line)
         except json.JSONDecodeError as exc:

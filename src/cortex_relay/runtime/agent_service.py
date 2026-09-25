@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from cortex_relay.core.models import TaskSpec
+from cortex_relay.core.models import TaskBudget, TaskSpec
 from cortex_relay.core.registry import ProviderRegistry
 from cortex_relay.runtime.agent_events import normalize_agent_events
+from cortex_relay.runtime.progress import normalize_progress
+from cortex_relay.runtime.supervision import SupervisionTracker
 
 
 class AgentService:
@@ -90,6 +92,31 @@ class AgentService:
                     with self._lock:
                         if self._lease_owners.get(session_id) == owner_id:
                             self._lease_owners.pop(session_id, None)
+
+    def _renew_lease_on_progress(self, session_id: str) -> None:
+        """Refresh durable ownership when the provider emits meaningful progress."""
+        with self._lock:
+            owner_id = self._lease_owners.get(session_id)
+        renewed = False
+        if owner_id is not None:
+            try:
+                renewed = self.store.heartbeat(
+                    session_id,
+                    owner_id,
+                    ttl_seconds=self._lease_ttl_seconds,
+                )
+            except (OSError, ValueError):
+                renewed = False
+        try:
+            self.store.merge_metadata(
+                session_id,
+                {
+                    "last_progress_at": time.time(),
+                    "lease_renewed_by_progress": renewed,
+                },
+            )
+        except (OSError, ValueError):
+            pass
 
     def _begin_lease(self, session_id: str) -> str:
         owner_id = f"{os.getpid()}:{threading.get_ident()}:{uuid4().hex}"
@@ -181,6 +208,11 @@ class AgentService:
         model: str | None,
         timeout_seconds: int,
         parent_session_id: str | None,
+        max_tool_calls: int | None = None,
+        max_repeated_calls: int | None = None,
+        max_idle_seconds: int | None = None,
+        max_runtime_seconds: int | None = None,
+        max_child_agents: int | None = None,
         on_started: Any = None,
     ) -> TaskSpec:
         if not objective.strip():
@@ -201,7 +233,9 @@ class AgentService:
             model=model,
             timeout_seconds=timeout_seconds,
         )
-        metadata: dict[str, Any] = {}
+        metadata: dict[str, Any] = {
+            "_agent_progress": self._renew_lease_on_progress,
+        }
         if parent_session_id is not None:
             parent = self.store.get(parent_session_id)
             if parent.workspace.resolve() != resolved_workspace:
@@ -220,8 +254,19 @@ class AgentService:
             access=resolved_access,  # type: ignore[arg-type]
             reasoning=reasoning,
             model=model,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=(
+                min(timeout_seconds, max_runtime_seconds)
+                if max_runtime_seconds is not None
+                else timeout_seconds
+            ),
             isolate_write=False,
+            budget=TaskBudget(
+                max_tool_calls=max_tool_calls,
+                max_repeated_calls=max_repeated_calls,
+                max_idle_seconds=max_idle_seconds,
+                max_runtime_seconds=max_runtime_seconds,
+                max_child_agents=max_child_agents,
+            ),
             metadata=metadata,
         )
 
@@ -239,6 +284,11 @@ class AgentService:
         model: str | None = None,
         timeout_seconds: int = 300,
         parent_session_id: str | None = None,
+        max_tool_calls: int | None = None,
+        max_repeated_calls: int | None = None,
+        max_idle_seconds: int | None = None,
+        max_runtime_seconds: int | None = None,
+        max_child_agents: int | None = None,
     ) -> dict[str, Any]:
         """Start a direct persistent provider-backed agent session and await its first turn."""
         holder: dict[str, str] = {}
@@ -268,6 +318,11 @@ class AgentService:
             model=model,
             timeout_seconds=timeout_seconds,
             parent_session_id=parent_session_id,
+            max_tool_calls=max_tool_calls,
+            max_repeated_calls=max_repeated_calls,
+            max_idle_seconds=max_idle_seconds,
+            max_runtime_seconds=max_runtime_seconds,
+            max_child_agents=max_child_agents,
             on_started=on_started,
         )
         task = replace(
@@ -308,6 +363,11 @@ class AgentService:
         model: str | None = None,
         timeout_seconds: int = 300,
         parent_session_id: str | None = None,
+        max_tool_calls: int | None = None,
+        max_repeated_calls: int | None = None,
+        max_idle_seconds: int | None = None,
+        max_runtime_seconds: int | None = None,
+        max_child_agents: int | None = None,
     ) -> dict[str, Any]:
         """Start a direct persistent session concurrently and return its session ID.
 
@@ -346,6 +406,11 @@ class AgentService:
             model=model,
             timeout_seconds=timeout_seconds,
             parent_session_id=parent_session_id,
+            max_tool_calls=max_tool_calls,
+            max_repeated_calls=max_repeated_calls,
+            max_idle_seconds=max_idle_seconds,
+            max_runtime_seconds=max_runtime_seconds,
+            max_child_agents=max_child_agents,
             on_started=on_started,
         )
         task = TaskSpec(
@@ -650,11 +715,46 @@ class AgentService:
             )
             self.store.update(session_id, state="running")
 
+            raw_budget = session.metadata.get("budget")
+            budget_values = raw_budget if isinstance(raw_budget, dict) else {}
+            budget = TaskBudget(
+                max_tokens=budget_values.get("max_tokens"),
+                max_cost=budget_values.get("max_cost"),
+                max_tool_calls=budget_values.get("max_tool_calls"),
+                max_repeated_calls=budget_values.get("max_repeated_calls"),
+                max_idle_seconds=budget_values.get("max_idle_seconds"),
+                max_runtime_seconds=budget_values.get("max_runtime_seconds"),
+                max_child_agents=budget_values.get("max_child_agents"),
+            )
+            supervision = SupervisionTracker(budget)
+
+            def trip_budget(
+                reason: str,
+                activity: str,
+                termination_reason: str,
+            ) -> None:
+                cancel_event.set()
+                self.store.merge_metadata(
+                    session_id,
+                    {
+                        "budget_exceeded": True,
+                        "budget_reason": reason,
+                        "termination_reason": termination_reason,
+                        "current_activity": activity,
+                    },
+                )
+
             def progress_line(
                 provider_name: str,
                 line: str,
                 stream: str = "stdout",
             ) -> None:
+                semantic = normalize_progress(
+                    provider_name,
+                    line,
+                    session_id,
+                    stream,
+                )
                 for event in normalize_agent_events(
                     provider_name,
                     line,
@@ -662,7 +762,22 @@ class AgentService:
                     stream,
                 ):
                     self.registry.record_agent_event(provider_name, event)
+                if semantic is None:
+                    return
+                self._renew_lease_on_progress(session_id)
+                violation = supervision.observe(semantic)
+                if violation is not None:
+                    trip_budget(
+                        violation.reason,
+                        violation.activity,
+                        violation.termination_reason,
+                    )
 
+            effective_timeout = (
+                min(timeout_seconds, budget.max_runtime_seconds)
+                if budget.max_runtime_seconds is not None
+                else timeout_seconds
+            )
             task = TaskSpec(
                 objective=message,
                 role=session.role,
@@ -671,8 +786,9 @@ class AgentService:
                 access=session.access,  # type: ignore[arg-type]
                 reasoning=session.reasoning,
                 model=session.model,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=effective_timeout,
                 isolate_write=False,
+                budget=budget,
                 metadata={
                     "_agent_session_id": session_id,
                     "_progress_line": progress_line,
@@ -681,7 +797,8 @@ class AgentService:
                 },
             )
             try:
-                result = provider.continue_session(
+                result = self.registry.continue_provider_session(
+                    provider,
                     task,
                     session.provider_session_id,
                 )
@@ -700,6 +817,22 @@ class AgentService:
                 )
                 self.store.update(session_id, state="failed")
                 raise
+
+            latest_metadata = self.store.get(session_id).metadata
+            if latest_metadata.get("budget_exceeded"):
+                result = replace(
+                    result,
+                    status="budget_exceeded",
+                    summary="CortexRelay stopped the agent follow-up after a supervision budget was exceeded.",
+                    error=str(
+                        latest_metadata.get("budget_reason")
+                        or "agent follow-up supervision budget exceeded"
+                    ),
+                    termination_reason=str(
+                        latest_metadata.get("termination_reason")
+                        or "supervisor_budget"
+                    ),
+                )
 
             if result.conversation_id:
                 self.store.bind_provider_session(
@@ -724,7 +857,7 @@ class AgentService:
                     if result.status == "success"
                     else (
                         "interrupted"
-                        if result.status in {"cancelled", "timeout"}
+                        if result.status in {"cancelled", "timeout", "budget_exceeded"}
                         else "failed"
                     )
                 ),

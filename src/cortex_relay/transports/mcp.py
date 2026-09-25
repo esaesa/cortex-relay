@@ -101,6 +101,11 @@ def create_server(
         isolate_write: bool = True,
         max_tokens: int | None = None,
         max_cost: float | None = None,
+        max_tool_calls: int | None = None,
+        max_repeated_calls: int | None = None,
+        max_idle_seconds: int | None = None,
+        max_runtime_seconds: int | None = None,
+        max_child_agents: int | None = None,
         require_changed_files: bool = False,
         require_tests: bool = False,
         allowed_paths: list[str] | None = None,
@@ -126,6 +131,11 @@ def create_server(
             isolate_write=isolate_write,
             max_tokens=max_tokens,
             max_cost=max_cost,
+            max_tool_calls=max_tool_calls,
+            max_repeated_calls=max_repeated_calls,
+            max_idle_seconds=max_idle_seconds,
+            max_runtime_seconds=max_runtime_seconds,
+            max_child_agents=max_child_agents,
             require_changed_files=require_changed_files,
             require_tests=require_tests,
             allowed_paths=allowed_paths or [],
@@ -173,6 +183,11 @@ def create_server(
         max_depth: int = 8,
         max_tokens: int | None = None,
         max_cost: float | None = None,
+        max_tool_calls: int | None = None,
+        max_repeated_calls: int | None = None,
+        max_idle_seconds: int | None = None,
+        max_runtime_seconds: int | None = None,
+        max_child_agents: int | None = None,
         require_changed_files: bool = False,
         require_tests: bool = False,
         require_review: bool = False,
@@ -196,6 +211,11 @@ def create_server(
             isolate_write=isolate_write,
             max_tokens=max_tokens,
             max_cost=max_cost,
+            max_tool_calls=max_tool_calls,
+            max_repeated_calls=max_repeated_calls,
+            max_idle_seconds=max_idle_seconds,
+            max_runtime_seconds=max_runtime_seconds,
+            max_child_agents=max_child_agents,
             require_changed_files=require_changed_files,
             require_tests=require_tests,
             require_review=require_review,
@@ -292,12 +312,18 @@ def create_server(
         model: str | None = None,
         timeout_seconds: int = 300,
         parent_session_id: str | None = None,
+        max_tool_calls: int | None = None,
+        max_repeated_calls: int | None = None,
+        max_idle_seconds: int | None = None,
+        max_runtime_seconds: int | None = None,
+        max_child_agents: int | None = None,
     ) -> dict[str, Any]:
         """Start a direct persistent/resumable agent session and await its first turn.
 
         access=auto inherits the selected profile's configured access. This bypasses
-        task DAGs, scheduler queues, worktree isolation, task budgets, quality gates,
-        and artifact handoff. Use delegate/delegate_async when those workflow
+        task DAGs, scheduler queues, worktree isolation, token/cost workflow budgets,
+        quality gates, and artifact handoff, but supports direct supervision limits
+        for tools, repeats, idle time, runtime, and child agents. Use delegate/delegate_async when those workflow
         guarantees are required. Closed-end providers are rejected here.
         """
         return agent_control.start(
@@ -312,6 +338,11 @@ def create_server(
             model=model,
             timeout_seconds=timeout_seconds,
             parent_session_id=parent_session_id,
+            max_tool_calls=max_tool_calls,
+            max_repeated_calls=max_repeated_calls,
+            max_idle_seconds=max_idle_seconds,
+            max_runtime_seconds=max_runtime_seconds,
+            max_child_agents=max_child_agents,
         )
 
     @server.tool()
@@ -327,15 +358,21 @@ def create_server(
         model: str | None = None,
         timeout_seconds: int = 300,
         parent_session_id: str | None = None,
+        max_tool_calls: int | None = None,
+        max_repeated_calls: int | None = None,
+        max_idle_seconds: int | None = None,
+        max_runtime_seconds: int | None = None,
+        max_child_agents: int | None = None,
     ) -> dict[str, Any]:
         """Start a direct persistent/resumable agent concurrently.
 
         Returns agent_session_id as soon as the Cortex session exists, without
         creating a workflow task. Use this for parallel direct specialists and
         consume agent_events with sequence cursors plus agent_wait for completion.
-        access=auto inherits the selected profile's configured access. Use
-        delegate_async instead when DAG scheduling, task budgets, worktree
-        isolation, quality gates, or artifact lineage are required.
+        access=auto inherits the selected profile's configured access. Direct
+        supervision limits remain available for tools, repeats, idle time, runtime,
+        and child agents. Use delegate_async instead when DAG scheduling, token/cost
+        workflow budgets, worktree isolation, quality gates, or artifact lineage are required.
         """
         return agent_control.start_async(
             objective=objective,
@@ -349,6 +386,11 @@ def create_server(
             model=model,
             timeout_seconds=timeout_seconds,
             parent_session_id=parent_session_id,
+            max_tool_calls=max_tool_calls,
+            max_repeated_calls=max_repeated_calls,
+            max_idle_seconds=max_idle_seconds,
+            max_runtime_seconds=max_runtime_seconds,
+            max_child_agents=max_child_agents,
         )
 
     @server.tool()
@@ -575,6 +617,21 @@ def _task_from_mapping(data: dict[str, Any]) -> TaskSpec:
         max_cost=(
             float(data["max_cost"]) if data.get("max_cost") is not None else None
         ),
+        max_tool_calls=(
+            int(data["max_tool_calls"]) if data.get("max_tool_calls") is not None else None
+        ),
+        max_repeated_calls=(
+            int(data["max_repeated_calls"]) if data.get("max_repeated_calls") is not None else None
+        ),
+        max_idle_seconds=(
+            int(data["max_idle_seconds"]) if data.get("max_idle_seconds") is not None else None
+        ),
+        max_runtime_seconds=(
+            int(data["max_runtime_seconds"]) if data.get("max_runtime_seconds") is not None else None
+        ),
+        max_child_agents=(
+            int(data["max_child_agents"]) if data.get("max_child_agents") is not None else None
+        ),
         require_changed_files=bool(data.get("require_changed_files", False)),
         require_tests=bool(data.get("require_tests", False)),
         require_review=bool(data.get("require_review", False)),
@@ -605,6 +662,11 @@ def _task_from_values(
     isolate_write: bool,
     max_tokens: int | None = None,
     max_cost: float | None = None,
+    max_tool_calls: int | None = None,
+    max_repeated_calls: int | None = None,
+    max_idle_seconds: int | None = None,
+    max_runtime_seconds: int | None = None,
+    max_child_agents: int | None = None,
     require_changed_files: bool = False,
     require_tests: bool = False,
     require_review: bool = False,
@@ -626,7 +688,15 @@ def _task_from_values(
         acceptance_criteria=tuple(acceptance_criteria),
         timeout_seconds=timeout_seconds,
         isolate_write=access == "workspace_write" and isolate_write,
-        budget=TaskBudget(max_tokens=max_tokens, max_cost=max_cost),
+        budget=TaskBudget(
+            max_tokens=max_tokens,
+            max_cost=max_cost,
+            max_tool_calls=max_tool_calls,
+            max_repeated_calls=max_repeated_calls,
+            max_idle_seconds=max_idle_seconds,
+            max_runtime_seconds=max_runtime_seconds,
+            max_child_agents=max_child_agents,
+        ),
         quality_gates=QualityGates(
             require_changed_files=require_changed_files,
             require_tests=require_tests,

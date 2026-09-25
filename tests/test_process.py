@@ -8,10 +8,28 @@ import warnings
 
 from pathlib import Path
 
-from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner
+from cortex_relay.runtime.process import (
+    ProcessCancelledError,
+    ProcessIdleTimeoutError,
+    ProcessRunner,
+)
 
 
 class ProcessRunnerTests(unittest.TestCase):
+    def test_process_idle_timeout_is_distinct_from_absolute_timeout(self):
+        with self.assertRaises(ProcessIdleTimeoutError) as caught:
+            ProcessRunner().run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(5)",
+                ],
+                cwd=Path.cwd(),
+                timeout_seconds=4,
+                idle_timeout_seconds=0.2,
+            )
+        self.assertAlmostEqual(caught.exception.idle_timeout_seconds, 0.2)
+
     def test_process_can_be_cancelled(self):
         cancel_event = threading.Event()
         timer = threading.Timer(0.2, cancel_event.set)

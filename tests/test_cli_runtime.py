@@ -155,6 +155,34 @@ class CLIRuntimeTests(unittest.TestCase):
                 )
         self.assertEqual(code, 0)
 
+    def test_delegate_carries_supervisor_budgets(self):
+        registry = FakeRegistry()
+        output = io.StringIO()
+        with patch("cortex_relay.cli.default_registry", return_value=registry):
+            with redirect_stdout(output):
+                code = main(
+                    [
+                        "delegate",
+                        "Inspect boundedly",
+                        "--max-tool-calls",
+                        "8",
+                        "--max-repeated-calls",
+                        "2",
+                        "--max-idle-seconds",
+                        "30",
+                        "--max-runtime-seconds",
+                        "120",
+                        "--max-child-agents",
+                        "3",
+                    ]
+                )
+        self.assertEqual(code, 0)
+        self.assertEqual(registry.last_task.budget.max_tool_calls, 8)
+        self.assertEqual(registry.last_task.budget.max_repeated_calls, 2)
+        self.assertEqual(registry.last_task.budget.max_idle_seconds, 30)
+        self.assertEqual(registry.last_task.budget.max_runtime_seconds, 120)
+        self.assertEqual(registry.last_task.budget.max_child_agents, 3)
+
     def test_delegate_carries_profile_and_preset(self):
         registry = FakeRegistry()
         output = io.StringIO()
