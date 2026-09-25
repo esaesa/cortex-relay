@@ -2,7 +2,7 @@
 
 **Provider-neutral coding-agent delegation plus cost-aware orchestration configuration for Codex and Gemini CLI.**
 
-CortexRelay is an open-source delegation runtime and configuration toolkit. It lets a primary coding agent keep ownership of planning and final synthesis while delegating bounded work through a common task/result contract to external providers such as OpenCode, Antigravity CLI, and OpenAI Codex CLI.
+CortexRelay is an open-source multi-agent control plane and configuration toolkit. It lets a primary coding agent keep ownership of planning and final synthesis while delegating bounded work through provider-neutral agent sessions backed by OpenCode, Antigravity CLI, and OpenAI Codex. Tasks describe orchestration; durable agent sessions carry live events, child-agent topology, messages, resumable provider handles, and complete final results.
 
 The configuration bootstrap supports two host backends today:
 
@@ -40,7 +40,9 @@ A bad worker decision normally affects one task. A bad orchestration decision ca
 
 - **Better cost/quality allocation** instead of one model and one thinking level for every task.
 - **Preserved planning quality** because the primary model owns decomposition, arbitration, and final synthesis.
-- **Lower context pressure without information loss** because workers return structured summaries/evidence while preserving their complete final answer for the orchestrator.
+- **Lower context pressure without information loss** because workers expose structured summaries/evidence while preserving their complete final answer and durable semantic event stream.
+- **Session continuity** so the orchestrator can inspect, message, and resume the same provider-backed worker instead of starting over.
+- **Native child visibility** for Codex, OpenCode, and Antigravity subagents through one CortexRelay agent tree.
 - **Parallelism** for independent exploration, review, documentation, and testing work.
 - **Repeatability** through version-controlled configuration.
 - **Provider portability**: Codex and Gemini CLI are adapters over the same orchestration idea.
@@ -269,30 +271,35 @@ cleanup_on_start = true
 
 ## Runtime delegation
 
-Version 0.9 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI as provider-neutral runtime workers, exposed through direct CLI delegation, MCP, and an A2A server for remote agents such as Gemini CLI.
+CortexRelay uses a session-first runtime for OpenCode, Antigravity, and Codex. The old one-shot subprocess path remains available as an explicit **closed-end** execution mode for CI-style jobs, unknown future providers, or environments where a richer session transport is unavailable; it is no longer the architectural default.
 
 ```text
 Primary coding agent
         |
-        | bounded task
+        | bounded task / follow-up
         v
-   CortexRelay
+   CortexRelay control plane
         |
-        +--> routing policy
-        +--> workspace isolation
-        +--> provider adapter
-                  |
-                  v
-        +---------+---------+---------+
-        |                   |         |
-    OpenCode         Antigravity   Codex CLI
-        |                   |         |
-        +---------+---------+---------+
-                  v
-          normalized result
+        +--> routing / budgets / worktrees
+        +--> durable AgentSession
+        |       |
+        |       +--> AgentEvent stream
+        |       +--> AgentMessage history
+        |       +--> child AgentSessions
+        |
+        +---------+-----------+-----------+
+        |                     |           |
+  OpenCode session      AGY conversation  Codex app-server thread
+        |                     |           |
+        +---------- provider-native children --------+
+                              |
+                              v
+                         TaskResult
 ```
 
-The calling agent remains the orchestrator. CortexRelay handles deterministic routing, execution, isolation, normalization, and protocol exposure rather than adding another planning model.
+The calling agent remains the orchestrator. CortexRelay owns deterministic routing, session control, event persistence, child topology, workspace isolation, and normalized results rather than adding another planning model.
+
+The MCP surface now includes direct agent controls: `agents`, `agent_get`, `agent_events`, `agent_messages`, `agent_children`, `agent_send`, and `agent_close`. Completed task results expose `agent_session_id`, while `task_output` remains the lossless chunked final-answer channel.
 
 Inspect runtime providers:
 
