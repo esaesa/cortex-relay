@@ -103,6 +103,51 @@ class ProgressProjectionTests(unittest.TestCase):
         self.assertEqual(len(progress.plan), 2)
         self.assertTrue(progress.plan[0]["completed"])
 
+    def test_child_and_tool_from_same_line_both_project_without_drift(self):
+        raw = {
+            "event": "step_update",
+            "step_update": {
+                "step_index": 9,
+                "step_type": "tool",
+                "tool_name": "Read",
+                "state": "RUNNING",
+                "tool_info": {
+                    "parameters": {"path": "src/app.py"},
+                    "output": "reading",
+                },
+                "subagent_info": {
+                    "subagents": [
+                        {
+                            "role": "explorer",
+                            "type_name": "worker",
+                            "state": "RUNNING",
+                            "conversation_id": "child-9",
+                        }
+                    ]
+                },
+            },
+        }
+        line = json.dumps(raw)
+        semantic = normalize_agent_events(
+            "antigravity", line, "agent-test"
+        )
+        progress = normalize_progress_events(
+            "antigravity", line, "task-test"
+        )
+        self.assertEqual(
+            [item.kind for item in semantic],
+            ["child_update", "tool"],
+        )
+        self.assertEqual(
+            [item.phase for item in progress],
+            ["subagent", "tool"],
+        )
+        self.assertEqual(
+            progress[0].subagents[0]["conversation_id"],
+            "child-9",
+        )
+        self.assertEqual(progress[1].path, "src/app.py")
+
     def test_opencode_one_line_can_project_session_and_response(self):
         raw = {
             "type": "text",
