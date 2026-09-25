@@ -81,6 +81,89 @@ class ProviderRegistry:
         config = self.profiles.load(workspace)
         return config.to_dict(preset=preset)
 
+
+    def start_agent(self, task: TaskSpec) -> TaskResult:
+        """Start one direct provider-backed agent session without creating a workflow task.
+
+        This is the session-first path. It deliberately skips DAG scheduling,
+        worktree isolation, task budgets, and task lifecycle records. Callers that
+        need those workflow guarantees should use the task/delegation API instead.
+        """
+        task = replace(task, isolate_write=False)
+        try:
+            config = self.profiles.load(task.workspace)
+            profile = config.profile_for_task(task)
+        except (OSError, ValueError) as exc:
+            return TaskResult(
+                status="error",
+                provider=task.provider,
+                model=task.model,
+                summary="CortexRelay execution-profile configuration is invalid.",
+                error=str(exc),
+            )
+
+        if profile is None:
+            return self._start_direct_agent_provider(task)
+
+        try:
+            chain = config.fallback_chain(profile)
+        except ValueError as exc:
+            return TaskResult(
+                status="error",
+                provider=profile.provider,
+                model=profile.model,
+                summary="CortexRelay profile fallback configuration is invalid.",
+                error=str(exc),
+            )
+
+        attempts: list[dict[str, Any]] = []
+        source = "explicit" if task.profile else f"role:{task.role}"
+        last: TaskResult | None = None
+        for index, candidate in enumerate(chain, start=1):
+            if task.access == "workspace_write" and candidate.access == "read_only":
+                result = TaskResult(
+                    status="error",
+                    provider=candidate.provider,
+                    model=candidate.model,
+                    summary="Selected CortexRelay profile does not permit workspace writes.",
+                    error=(
+                        f"profile {candidate.name!r} has access=read_only but the "
+                        "agent session requires workspace_write"
+                    ),
+                )
+            else:
+                effective = replace(
+                    self._task_for_profile(task, candidate),
+                    isolate_write=False,
+                )
+                result = self._start_direct_agent_provider(effective)
+
+            attempts.append(
+                {
+                    "attempt": index,
+                    "profile": candidate.name,
+                    "provider": candidate.provider,
+                    "model": candidate.model,
+                    "status": result.status,
+                    "error": result.error,
+                }
+            )
+            result = self._with_routing_metadata(
+                result,
+                candidate,
+                task,
+                attempts,
+                source=source,
+            )
+            last = result
+            if result.ok or result.status == "cancelled":
+                return result
+            if result.status not in candidate.fallback_on:
+                return result
+
+        assert last is not None
+        return last
+
     def execute(self, task: TaskSpec) -> TaskResult:
         source_workspace = task.workspace
         task_id = task.metadata.get("_task_id") if task.metadata.get("_prestarted") else None
@@ -305,6 +388,13 @@ class ProviderRegistry:
                 "profile": task.profile,
             },
         )
+        self.agent_store.add_message(
+            session.session_id,
+            direction="host_to_agent",
+            content=task.objective,
+            recipient_session_id=session.session_id,
+            metadata={"initial": True},
+        )
         task_id = task.metadata.get("_task_id")
         source_workspace = task.metadata.get("_observability_workspace")
         if isinstance(task_id, str) and isinstance(source_workspace, str):
@@ -475,6 +565,54 @@ class ProviderRegistry:
             reasoning=profile.reasoning,
             isolate_write=isolate_write,
             metadata=metadata,
+        )
+
+    def _start_direct_agent_provider(self, task: TaskSpec) -> TaskResult:
+        try:
+            provider = self.resolve(task)
+        except KeyError as exc:
+            return TaskResult(
+                status="unavailable",
+                provider=task.provider,
+                model=task.model,
+                summary="No matching CortexRelay runtime provider is registered.",
+                error=str(exc),
+            )
+
+        capabilities = provider.capabilities()
+        if not capabilities.available:
+            return TaskResult(
+                status="unavailable",
+                provider=provider.name,
+                model=task.model,
+                summary="Selected provider is unavailable.",
+                error=capabilities.detail,
+            )
+        if not capabilities.persistent_sessions:
+            return TaskResult(
+                status="unavailable",
+                provider=provider.name,
+                model=task.model,
+                summary="Selected provider does not expose persistent agent sessions.",
+                error=(
+                    f"{provider.name} is configured as {capabilities.session_mode}; "
+                    "use delegate/delegate_async for closed-end execution"
+                ),
+                metadata={
+                    "session_mode": capabilities.session_mode,
+                    "persistent_sessions": False,
+                },
+            )
+
+        result = self._execute_provider(replace(task, isolate_write=False))
+        return replace(
+            result,
+            metadata={
+                **result.metadata,
+                "session_mode": capabilities.session_mode,
+                "persistent_sessions": capabilities.persistent_sessions,
+                "workflow_task": False,
+            },
         )
 
     def _execute_provider(self, task: TaskSpec) -> TaskResult:
