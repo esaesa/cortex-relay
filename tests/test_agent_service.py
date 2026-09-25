@@ -70,6 +70,40 @@ class SessionProvider(ProviderAdapter):
         )
 
 
+class SemanticSessionProvider(SessionProvider):
+    name = "opencode"
+
+    def execute_session(self, task: TaskSpec) -> TaskResult:
+        progress = task.metadata.get("_progress_line")
+        if callable(progress):
+            progress(
+                self.name,
+                json.dumps(
+                    {
+                        "type": "tool",
+                        "sessionID": "provider-semantic-session",
+                        "part": {
+                            "type": "tool",
+                            "tool": "view_file",
+                            "state": {
+                                "status": "running",
+                                "input": {"filePath": "src/example.py"},
+                            },
+                        },
+                    }
+                ),
+                "stdout",
+            )
+        return TaskResult(
+            status="success",
+            provider=self.name,
+            model=task.model,
+            summary="semantic",
+            final_text="semantic answer",
+            conversation_id="provider-semantic-session",
+        )
+
+
 class SlowSessionProvider(SessionProvider):
     def __init__(self) -> None:
         super().__init__()
@@ -248,6 +282,38 @@ class AgentServiceTests(unittest.TestCase):
             self.assertEqual(result["provider"], "fake")
             self.assertIn("agent_session_id", result)
             self.assertFalse(alternate.executed)
+
+    def test_direct_agent_persists_supervision_budget_and_progress_renews_lease(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            provider = SemanticSessionProvider()
+            registry = ProviderRegistry(
+                [provider],
+                run_store=RunStore(root / "state"),
+            )
+            service = AgentService(
+                registry,
+                lease_ttl_seconds=2,
+                lease_heartbeat_seconds=0.2,
+            )
+            self.addCleanup(service.shutdown)
+
+            result = service.start(
+                objective="inspect one file",
+                provider="opencode",
+                workspace=workspace,
+                max_repeated_calls=2,
+                max_idle_seconds=11,
+                max_child_agents=1,
+            )
+            session = result["session"]
+            self.assertEqual(session["metadata"]["budget"]["max_repeated_calls"], 2)
+            self.assertEqual(session["metadata"]["budget"]["max_idle_seconds"], 11)
+            self.assertEqual(session["metadata"]["budget"]["max_child_agents"], 1)
+            self.assertIn("last_progress_at", session["metadata"])
+            self.assertTrue(session["metadata"]["lease_renewed_by_progress"])
 
     def test_watch_returns_visible_updates_and_authoritative_running_state(self):
         with tempfile.TemporaryDirectory() as tmp:
