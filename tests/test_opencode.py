@@ -43,6 +43,7 @@ class FakeRunner:
 
         payload = {
             "summary": "Implemented.",
+            "final_text": "Implemented the bounded change with complete details.",
             "evidence": [{"finding": "Done", "path": "app.py"}],
             "changed_files": ["app.py"],
             "commands": ["python -m unittest"],
@@ -103,6 +104,10 @@ class OpenCodeAdapterTests(unittest.TestCase):
         self.assertEqual(result.provider, "opencode")
         self.assertEqual(result.conversation_id, "session-123")
         self.assertEqual(result.usage["cost"], 0.01)
+        self.assertEqual(
+            result.final_text,
+            "Implemented the bounded change with complete details.",
+        )
         self.assertEqual(result.evidence[0].path, "app.py")
 
         call = runner.calls[-1]
