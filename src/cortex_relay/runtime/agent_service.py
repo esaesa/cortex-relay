@@ -246,6 +246,85 @@ class AgentService:
                 }
             time.sleep(0.05)
 
+    @staticmethod
+    def format_event(event: dict[str, Any]) -> str | None:
+        """Project one semantic event into a compact human-readable update."""
+        kind = str(event.get("kind") or "")
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        if kind == "lifecycle":
+            state = data.get("state")
+            return f"Agent state: {state}" if state else None
+        if kind in {"text_delta", "message"}:
+            text = data.get("text")
+            if isinstance(text, str) and text.strip():
+                compact = " ".join(text.strip().split())
+                return compact[:500]
+            return None
+        if kind == "tool":
+            name = data.get("name") or data.get("item_type") or "tool"
+            state = data.get("state") or data.get("status")
+            suffix = f" ({state})" if state else ""
+            return f"Using {name}{suffix}"
+        if kind == "child_update":
+            role = data.get("role") or "subagent"
+            state = data.get("state") or "running"
+            return f"Child {role}: {state}"
+        if kind == "diagnostic":
+            error = data.get("error")
+            text = data.get("text")
+            detail = error if error is not None else text
+            return f"Diagnostic: {detail}"[:500] if detail else None
+        if kind == "provider_session":
+            return "Provider session established"
+        return None
+
+    def watch(
+        self,
+        session_id: str,
+        *,
+        after_sequence: int = 0,
+        timeout_seconds: float = 10,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Wait for semantic activity or terminal state and return visible updates."""
+        if after_sequence < 0:
+            raise ValueError("after_sequence must be non-negative")
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be non-negative")
+        if not 1 <= limit <= 200:
+            raise ValueError("limit must be 1..200")
+
+        deadline = time.monotonic() + min(timeout_seconds, 30.0)
+        while True:
+            event_payload = self.events(
+                session_id,
+                after_sequence=after_sequence,
+                limit=limit,
+            )
+            session = self.get(session_id)
+            complete = session["state"] not in {"starting", "running"}
+            events = event_payload["events"]
+            if events or complete or timeout_seconds == 0 or time.monotonic() >= deadline:
+                updates = [
+                    update
+                    for event in events
+                    if (update := self.format_event(event)) is not None
+                ]
+                if not updates and not complete:
+                    updates = ["Agent is still running; no new semantic event yet."]
+                return {
+                    "agent_session_id": session_id,
+                    "status": session["state"],
+                    "complete": complete,
+                    "authoritative_session": True,
+                    "replacement_recommended": False,
+                    "events": events,
+                    "updates": updates,
+                    "next_sequence": event_payload["next_sequence"],
+                    "result": self.result(session_id) if complete else None,
+                }
+            time.sleep(0.1)
+
     def result(self, session_id: str) -> dict[str, Any] | None:
         return self.store.result(session_id)
 
