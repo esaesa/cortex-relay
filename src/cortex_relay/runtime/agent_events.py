@@ -8,6 +8,10 @@ from cortex_relay.core.agents import AgentEvent
 
 
 _SECRET_KEY = re.compile(r"(?i)(api[_-]?key|access[_-]?token|authorization|password|secret)")
+_SECRET_VALUE = re.compile(
+    r"(?i)\b(api[_-]?key|access[_-]?token|authorization|password|secret)"
+    r"\b(\s*[:=]\s*)(\S+)"
+)
 _BEARER = re.compile(r"(?i)\bBearer\s+\S+")
 _LONG_TOKEN = re.compile(r"(?<![\w])[A-Za-z0-9_+/=-]{48,}(?![\w])")
 
@@ -607,7 +611,8 @@ def _sanitize(value: Any, *, depth: int = 0) -> Any:
     if depth > 8:
         return "[truncated]"
     if isinstance(value, str):
-        text = _BEARER.sub("Bearer [redacted]", value)
+        text = _SECRET_VALUE.sub(r"\1\2[redacted]", value)
+        text = _BEARER.sub("Bearer [redacted]", text)
         text = _LONG_TOKEN.sub("[redacted]", text)
         return text[:16000]
     if isinstance(value, dict):
