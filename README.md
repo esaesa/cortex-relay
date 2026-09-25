@@ -164,14 +164,21 @@ cortex-relay status --watch
 CortexRelay live status
 =======================
 Host: muse → opencode/muse/xhigh [RUNNING]
-active 1 | success 0 | failed 0 | tokens 8.4k | cost $0.0063
+Tasks: active 0 | success 0 | failed 0
+Agents: running 2 | idle 8 | failed 1
 
-● muse → implementer → worker → opencode/gpt-6-luna/max
-  RUNNING     18s  Implement feature X
-  worktree .../implementer-...
+● implementer → antigravity/gemini-3.8-flash-high/high
+  RUNNING     18s  Keep frontend running
+  session agent-... | access workspace_write | provider-session ...
+  Current: powershell (running)
+
+↳ explorer → antigravity/gemini-3.8-flash-high/high
+  RUNNING      9s  Provider-native child agent
+  session agent-... | parent agent-...
+  Current: inspecting frontend state
 ```
 
-`status --watch` shows active requests and a host session only while its launcher is alive. It hides completed tasks from previous sessions; use `status` or `history` to inspect them. If a launcher exits without recording shutdown, the watcher reports that session as interrupted instead of claiming it is still running. The dashboard records the routing path, role, profile, provider, model, reasoning variant, lifecycle status, elapsed time, worktree, tests, changed files, normalized token usage, provider-reported cost when available, result summary, and errors.
+`status --watch` is a unified live monitor for the host session, workflow tasks, direct `agent_start`/`agent_start_async` sessions, and provider-native child agents in the selected workspace. Active rows update continuously; workspace-wide agent totals still include idle/failed sessions for health context. It hides completed workflow tasks from previous sessions; use `status` or `history` to inspect them. If a launcher exits without recording shutdown, the watcher reports that session as interrupted instead of claiming it is still running. The dashboard records the routing path, role, profile, provider, model, reasoning variant, lifecycle status, elapsed time, worktree, tests, changed files, normalized token usage, provider-reported cost when available, result summary, and errors.
 
 Useful commands:
 
