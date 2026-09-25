@@ -13,7 +13,8 @@ from cortex_relay.providers.antigravity import AntigravityAdapter
 from cortex_relay.providers.base import ProviderAdapter
 from cortex_relay.providers.codex import CodexAdapter
 from cortex_relay.providers.opencode import OpenCodeAdapter
-from cortex_relay.observability import RunStore
+from cortex_relay.observability import RunStore, summarize_usage
+from cortex_relay.runtime.artifacts import ArtifactStore
 from cortex_relay.runtime.progress import normalize_progress
 from cortex_relay.runtime.worktree import WorktreeManager
 
@@ -79,10 +80,38 @@ class ProviderRegistry:
         metadata = dict(task.metadata)
         metadata["_task_id"] = task_id
         metadata["_observability_workspace"] = str(source_workspace)
+        external_progress = metadata.get("_external_progress")
         def progress_line(provider: str, line: str, stream: str = "stdout") -> None:
             event = normalize_progress(provider, line, task_id, stream)
-            if event is not None:
-                self.run_store.record_progress(source_workspace, event)
+            if event is None:
+                return
+            self.run_store.record_progress(source_workspace, event)
+            if callable(external_progress):
+                try:
+                    external_progress(event)
+                except Exception:
+                    pass
+            limit = task.budget.max_tokens
+            if limit is None:
+                return
+            observed = event.total_tokens
+            if observed is None:
+                observed = (
+                    (event.input_tokens or 0) + (event.output_tokens or 0)
+                    if event.input_tokens is not None or event.output_tokens is not None
+                    else None
+                )
+            if observed is not None and observed > limit:
+                cancel_event = task.metadata.get("_cancel_event")
+                if cancel_event is not None:
+                    cancel_event.set()
+                self.run_store.update_task(
+                    source_workspace,
+                    task_id,
+                    budget_exceeded=True,
+                    budget_reason=f"token budget exceeded: {observed} > {limit}",
+                    current_activity="Token budget exceeded; cancellation requested",
+                )
 
         metadata["_progress_line"] = progress_line
         metadata["_progress_heartbeat"] = lambda pid, alive: self.run_store.record_heartbeat(
@@ -116,6 +145,41 @@ class ProviderRegistry:
                 updates["status"] = "error"
             self.run_store.update_task(source_workspace, task_id, **updates)
             raise
+
+        usage_summary = summarize_usage(result.usage)
+        budget_error: str | None = None
+        if task.budget.max_tokens is not None:
+            total = usage_summary.get("total_tokens")
+            if isinstance(total, int) and total > task.budget.max_tokens:
+                budget_error = (
+                    f"token budget exceeded: {total} > {task.budget.max_tokens}"
+                )
+        if task.budget.max_cost is not None:
+            cost = usage_summary.get("cost")
+            if isinstance(cost, (int, float)) and float(cost) > task.budget.max_cost:
+                budget_error = (
+                    f"cost budget exceeded: {float(cost):.6f} > {task.budget.max_cost:.6f}"
+                )
+        stored = self.run_store.get_task(source_workspace, task_id) or {}
+        if stored.get("budget_exceeded") and not budget_error:
+            budget_error = str(stored.get("budget_reason") or "task budget exceeded")
+        if budget_error and result.status not in {"cancelled", "timeout"}:
+            result = TaskResult(
+                status="budget_exceeded",
+                provider=result.provider,
+                model=result.model,
+                summary="CortexRelay stopped or rejected work after its configured budget was exceeded.",
+                evidence=result.evidence,
+                changed_files=result.changed_files,
+                commands=result.commands,
+                tests=result.tests,
+                risks=result.risks,
+                conversation_id=result.conversation_id,
+                error=budget_error,
+                duration_seconds=result.duration_seconds,
+                usage=result.usage,
+                metadata=result.metadata,
+            )
 
         result_metadata = dict(result.metadata)
         result_metadata["task_id"] = task_id
@@ -287,7 +351,12 @@ class ProviderRegistry:
                 error=str(exc),
             )
 
-        if task.access != "workspace_write" or not task.isolate_write:
+        inherited_artifact = task.metadata.get("_inherit_artifact_id")
+        needs_inherited_workspace = isinstance(inherited_artifact, str)
+        if (
+            not needs_inherited_workspace
+            and (task.access != "workspace_write" or not task.isolate_write)
+        ):
             self._observe(
                 task,
                 status="running",
@@ -330,6 +399,30 @@ class ProviderRegistry:
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "handoff_status": None,
                 },
+            )
+
+        if isinstance(inherited_artifact, str):
+            try:
+                inheritance = ArtifactStore(self.run_store).apply_to_worktree(
+                    inherited_artifact, worktree.path
+                )
+            except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+                return TaskResult(
+                    status="error",
+                    provider=provider.name,
+                    model=task.model,
+                    summary="Could not inherit the requested workflow artifact.",
+                    error=str(exc),
+                    metadata={
+                        "worktree_path": str(worktree.path),
+                        "worktree_branch": worktree.branch,
+                        "worktree_base_commit": worktree.base_commit,
+                    },
+                )
+            self._observe(
+                task,
+                inherited_artifact_id=inherited_artifact,
+                inherited_from_task=inheritance.get("source_task_id"),
             )
 
         self._observe(

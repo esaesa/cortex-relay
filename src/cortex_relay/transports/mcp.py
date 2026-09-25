@@ -4,15 +4,16 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-from cortex_relay.core.models import TaskSpec
+from cortex_relay.core.models import QualityGates, TaskBudget, TaskSpec
 from cortex_relay.core.registry import ProviderRegistry, default_registry
+from cortex_relay.runtime.task_protocol import TaskControl
 from cortex_relay.runtime.task_service import TaskService
 
 
 def create_server(
     registry: ProviderRegistry | None = None,
     *,
-    async_tasks: TaskService | None = None,
+    async_tasks: TaskControl | None = None,
 ) -> Any:
     """Create the optional MCP v2 server without importing MCP at package import time."""
 
@@ -87,6 +88,12 @@ def create_server(
         acceptance_criteria: list[str] | None = None,
         timeout_seconds: int = 300,
         isolate_write: bool = True,
+        max_tokens: int | None = None,
+        max_cost: float | None = None,
+        require_changed_files: bool = False,
+        require_tests: bool = False,
+        allowed_paths: list[str] | None = None,
+        max_failed_tests: int | None = None,
     ) -> dict[str, Any]:
         """Delegate one bounded task and return a normalized structured result."""
         task = _task_from_values(
@@ -102,6 +109,12 @@ def create_server(
             acceptance_criteria=acceptance_criteria or [],
             timeout_seconds=timeout_seconds,
             isolate_write=isolate_write,
+            max_tokens=max_tokens,
+            max_cost=max_cost,
+            require_changed_files=require_changed_files,
+            require_tests=require_tests,
+            allowed_paths=allowed_paths or [],
+            max_failed_tests=max_failed_tests,
         )
         return runtime.execute(task).to_dict()
 
@@ -139,6 +152,17 @@ def create_server(
         isolate_write: bool = True,
         group_id: str | None = None,
         depends_on: list[str] | None = None,
+        inherit_workspace_from: str | None = None,
+        priority: int = 0,
+        parent_task_id: str | None = None,
+        max_depth: int = 8,
+        max_tokens: int | None = None,
+        max_cost: float | None = None,
+        require_changed_files: bool = False,
+        require_tests: bool = False,
+        require_review: bool = False,
+        allowed_paths: list[str] | None = None,
+        max_failed_tests: int | None = None,
     ) -> dict[str, Any]:
         """Start a delegation and return its task ID immediately."""
         task = _task_from_values(
@@ -146,10 +170,24 @@ def create_server(
             provider=provider, workspace=workspace, access=access,
             reasoning=reasoning, model=model,
             acceptance_criteria=acceptance_criteria or [],
-            timeout_seconds=timeout_seconds, isolate_write=isolate_write,
+            timeout_seconds=timeout_seconds,
+            isolate_write=isolate_write,
+            max_tokens=max_tokens,
+            max_cost=max_cost,
+            require_changed_files=require_changed_files,
+            require_tests=require_tests,
+            require_review=require_review,
+            allowed_paths=allowed_paths or [],
+            max_failed_tests=max_failed_tests,
         )
         return async_tasks.submit(
-            task, group_id=group_id, depends_on=tuple(depends_on or ())
+            task,
+            group_id=group_id,
+            depends_on=tuple(depends_on or ()),
+            inherit_workspace_from=inherit_workspace_from,
+            priority=priority,
+            parent_task_id=parent_task_id,
+            max_depth=max_depth,
         )
 
     @server.tool()
@@ -178,6 +216,11 @@ def create_server(
     def tasks(workspace: str = ".", group_id: str | None = None) -> list[dict[str, Any]]:
         """List persisted async delegations for a workspace, optionally by group."""
         return async_tasks.tasks(Path(workspace), group_id=group_id)
+
+    @server.tool()
+    def task_artifact(task_id: str, create: bool = True) -> dict[str, Any]:
+        """Return or create the immutable patch artifact produced by a task."""
+        return async_tasks.artifact(task_id, create=create)
 
     @server.tool()
     def task_worktree(task_id: str, attempt: int | None = None) -> dict[str, Any]:
@@ -243,6 +286,23 @@ def _task_from_mapping(data: dict[str, Any]) -> TaskSpec:
         ],
         timeout_seconds=int(data.get("timeout_seconds", 300)),
         isolate_write=bool(data.get("isolate_write", True)),
+        max_tokens=(
+            int(data["max_tokens"]) if data.get("max_tokens") is not None else None
+        ),
+        max_cost=(
+            float(data["max_cost"]) if data.get("max_cost") is not None else None
+        ),
+        require_changed_files=bool(data.get("require_changed_files", False)),
+        require_tests=bool(data.get("require_tests", False)),
+        require_review=bool(data.get("require_review", False)),
+        allowed_paths=[
+            str(item) for item in data.get("allowed_paths", [])
+            if isinstance(item, str)
+        ],
+        max_failed_tests=(
+            int(data["max_failed_tests"])
+            if data.get("max_failed_tests") is not None else None
+        ),
     )
 
 
@@ -260,6 +320,13 @@ def _task_from_values(
     acceptance_criteria: list[str],
     timeout_seconds: int,
     isolate_write: bool,
+    max_tokens: int | None = None,
+    max_cost: float | None = None,
+    require_changed_files: bool = False,
+    require_tests: bool = False,
+    require_review: bool = False,
+    allowed_paths: list[str] | None = None,
+    max_failed_tests: int | None = None,
 ) -> TaskSpec:
     if access not in {"read_only", "workspace_write"}:
         raise ValueError("access must be read_only or workspace_write")
@@ -276,4 +343,12 @@ def _task_from_values(
         acceptance_criteria=tuple(acceptance_criteria),
         timeout_seconds=timeout_seconds,
         isolate_write=access == "workspace_write" and isolate_write,
+        budget=TaskBudget(max_tokens=max_tokens, max_cost=max_cost),
+        quality_gates=QualityGates(
+            require_changed_files=require_changed_files,
+            require_tests=require_tests,
+            require_review=require_review,
+            allowed_paths=tuple(allowed_paths or ()),
+            max_failed_tests=max_failed_tests,
+        ),
     )

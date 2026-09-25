@@ -8,8 +8,90 @@ from typing import Any, Literal
 
 
 TaskAccess = Literal["read_only", "workspace_write"]
-TaskStatus = Literal["success", "error", "timeout", "unavailable", "cancelled", "blocked", "interrupted"]
+TaskStatus = Literal[
+    "success", "error", "timeout", "unavailable", "cancelled",
+    "blocked", "interrupted", "failed_gate", "budget_exceeded",
+]
 ReasoningLevel = str
+
+_CONTEXT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+@dataclass(frozen=True)
+class DelegationContext:
+    trace_id: str
+    parent_task_id: str | None = None
+    root_task_id: str | None = None
+    depth: int = 0
+    max_depth: int = 8
+    ancestry: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not _CONTEXT_ID_RE.fullmatch(self.trace_id):
+            raise ValueError("trace_id must be a bounded token")
+        for value, label in (
+            (self.parent_task_id, "parent_task_id"),
+            (self.root_task_id, "root_task_id"),
+        ):
+            if value is not None and not _CONTEXT_ID_RE.fullmatch(value):
+                raise ValueError(f"{label} must be a bounded token")
+        if self.depth < 0 or self.max_depth < 1 or self.depth > self.max_depth:
+            raise ValueError("delegation depth exceeds max_depth")
+        if len(self.ancestry) != len(set(self.ancestry)):
+            raise ValueError("delegation ancestry contains a loop")
+        if self.parent_task_id and self.parent_task_id in self.ancestry[:-1]:
+            raise ValueError("parent_task_id already appears earlier in ancestry")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "trace_id": self.trace_id,
+            "parent_task_id": self.parent_task_id,
+            "root_task_id": self.root_task_id,
+            "depth": self.depth,
+            "max_depth": self.max_depth,
+            "ancestry": list(self.ancestry),
+        }
+
+
+@dataclass(frozen=True)
+class TaskBudget:
+    max_tokens: int | None = None
+    max_cost: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_tokens is not None and self.max_tokens < 1:
+            raise ValueError("max_tokens must be positive")
+        if self.max_cost is not None and self.max_cost < 0:
+            raise ValueError("max_cost must be non-negative")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"max_tokens": self.max_tokens, "max_cost": self.max_cost}
+
+
+@dataclass(frozen=True)
+class QualityGates:
+    require_changed_files: bool = False
+    require_tests: bool = False
+    require_review: bool = False
+    allowed_paths: tuple[str, ...] = ()
+    max_failed_tests: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_failed_tests is not None and self.max_failed_tests < 0:
+            raise ValueError("max_failed_tests must be non-negative")
+        object.__setattr__(
+            self,
+            "allowed_paths",
+            tuple(path.strip().replace("\\", "/") for path in self.allowed_paths if path.strip()),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "require_changed_files": self.require_changed_files,
+            "require_tests": self.require_tests,
+            "require_review": self.require_review,
+            "allowed_paths": list(self.allowed_paths),
+            "max_failed_tests": self.max_failed_tests,
+        }
 
 _REASONING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
@@ -30,6 +112,9 @@ class TaskSpec:
     acceptance_criteria: tuple[str, ...] = ()
     timeout_seconds: int = 300
     isolate_write: bool = False
+    context: DelegationContext | None = None
+    budget: TaskBudget = field(default_factory=TaskBudget)
+    quality_gates: QualityGates = field(default_factory=QualityGates)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -80,6 +165,9 @@ class TaskSpec:
             "acceptance_criteria": list(self.acceptance_criteria),
             "timeout_seconds": self.timeout_seconds,
             "isolate_write": self.isolate_write,
+            "context": self.context.to_dict() if self.context else None,
+            "budget": self.budget.to_dict(),
+            "quality_gates": self.quality_gates.to_dict(),
             "metadata": {
                 key: value
                 for key, value in self.metadata.items()

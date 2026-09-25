@@ -9,7 +9,7 @@ from pathlib import Path
 
 from . import __version__
 from .configurator import ConfigValues
-from .core.models import TaskSpec
+from .core.models import QualityGates, TaskBudget, TaskSpec
 from .core.registry import default_registry
 from .diagnostics import configuration_checks, runtime_checks
 from .gemini import GEMINI_THINKING_LEVELS, GeminiConfigValues
@@ -120,6 +120,35 @@ def build_parser() -> argparse.ArgumentParser:
     history_parser.add_argument("--json", action="store_true", dest="as_json")
     history_parser.add_argument("--clear", action="store_true")
 
+    group_parser = subparsers.add_parser(
+        "group",
+        help="Show a persisted dependency group as a workflow graph.",
+    )
+    group_parser.add_argument("group_id")
+    group_parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    group_parser.add_argument("--watch", action="store_true")
+    group_parser.add_argument("--interval", type=float, default=1.0)
+    group_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    analytics_parser = subparsers.add_parser(
+        "analyze-routing",
+        help="Summarize historical route outcomes without changing routing.",
+    )
+    analytics_parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    analytics_parser.add_argument("--min-samples", type=int, default=1)
+    analytics_parser.add_argument("--json", action="store_true", dest="as_json")
+
+    gc_parser = subparsers.add_parser(
+        "gc",
+        help="Prune old terminal CortexRelay state without deleting worktrees.",
+    )
+    gc_parser.add_argument("--workspace", type=Path, default=Path.cwd())
+    gc_parser.add_argument("--dry-run", action="store_true")
+    gc_parser.add_argument("--retention-days", type=int)
+    gc_parser.add_argument("--max-completed-tasks", type=int)
+    gc_parser.add_argument("--max-event-log-mb", type=int)
+    gc_parser.add_argument("--json", action="store_true", dest="as_json")
+
     models_parser = subparsers.add_parser(
         "models",
         help="Discover models exposed by a runtime provider.",
@@ -183,6 +212,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Use a temporary git worktree for workspace-write tasks (default: enabled).",
     )
+    delegate_parser.add_argument("--max-tokens", type=int)
+    delegate_parser.add_argument("--max-cost", type=float)
+    delegate_parser.add_argument("--require-changed-files", action="store_true")
+    delegate_parser.add_argument("--require-tests", action="store_true")
+    delegate_parser.add_argument("--allowed-path", action="append", default=[], dest="allowed_paths")
+    delegate_parser.add_argument("--max-failed-tests", type=int)
     delegate_parser.add_argument("--json", action="store_true", dest="as_json")
 
     serve_parser = subparsers.add_parser("serve", help="Expose CortexRelay to another coding agent.")
@@ -333,6 +368,83 @@ def _profiles(args: argparse.Namespace) -> int:
     return 0
 
 
+def _group(args: argparse.Namespace) -> int:
+    from .observability import RunStore
+    from .runtime.workflow_view import group_snapshot, render_group
+
+    if args.interval < 0.2:
+        print("--interval must be at least 0.2 seconds", file=sys.stderr)
+        return 2
+    store = RunStore()
+
+    def snapshot():
+        return group_snapshot(store, args.workspace, args.group_id)
+
+    if args.as_json:
+        if args.watch:
+            print("--watch cannot be combined with --json", file=sys.stderr)
+            return 2
+        print(json.dumps(snapshot(), indent=2, ensure_ascii=False))
+        return 0
+    if not args.watch:
+        _print_dashboard(render_group(snapshot()))
+        return 0
+    try:
+        while True:
+            if sys.stdout.isatty():
+                print("\033[2J\033[H", end="")
+            _print_dashboard(render_group(snapshot()))
+            print("\nWatching group. Ctrl+C to exit.")
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        return 0
+
+
+def _analyze_routing(args: argparse.Namespace) -> int:
+    from .observability import RunStore
+    from .runtime.analytics import analyze_routing, render_routing_analysis
+
+    if args.min_samples < 1:
+        print("--min-samples must be at least 1", file=sys.stderr)
+        return 2
+    report = analyze_routing(
+        RunStore(), args.workspace, min_samples=args.min_samples
+    )
+    if args.as_json:
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+    else:
+        _print_dashboard(render_routing_analysis(report))
+    return 0
+
+
+def _gc(args: argparse.Namespace) -> int:
+    from .observability import RunStore
+
+    registry = default_registry()
+    try:
+        state = registry.profiles.load(args.workspace).state
+    except (OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    result = RunStore().gc(
+        workspace=args.workspace,
+        retention_days=args.retention_days or state.retention_days,
+        max_completed_tasks=args.max_completed_tasks or state.max_completed_tasks,
+        max_event_log_mb=args.max_event_log_mb or state.max_event_log_mb,
+        dry_run=args.dry_run,
+    )
+    if args.as_json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        mode = "Would prune" if args.dry_run else "Pruned"
+        print(f"{mode} {result['count']} terminal task record(s).")
+        for item in result["tasks"][:25]:
+            print(f"  {item['task_id']}")
+        if len(result["tasks"]) > 25:
+            print(f"  ... and {len(result['tasks']) - 25} more")
+    return 0
+
+
 def _status(args: argparse.Namespace, *, completed_only: bool = False) -> int:
     from .observability import RunStore, render_dashboard
 
@@ -448,6 +560,32 @@ def _models(args: argparse.Namespace) -> int:
     return 0
 
 
+def _orchestrator_contract(config, *, preset: str | None = None) -> str:
+    roles = config.effective_roles(preset)
+    lines = [
+        "You are the CortexRelay orchestrator.",
+        "Keep planning, arbitration, and final synthesis in this host session.",
+        "Use CortexRelay delegate_async for substantial implementation, testing, review, or parallel exploration.",
+        "Use task_events with sequence cursors for progress instead of repeatedly requesting full status.",
+        "For staged write workflows, use depends_on and inherit_workspace_from so downstream workers consume the exact immutable artifact produced upstream.",
+        "Inspect task_diff before task_apply. Never apply or discard a worker worktree without explicit user intent.",
+        "Respect configured budgets, quality gates, and scheduler queues. Do not bypass them with native subagents.",
+        "",
+        "Configured roles:",
+    ]
+    for role, profile_name in sorted(roles.items()):
+        profile = config.profiles.get(profile_name)
+        if profile is None:
+            lines.append(f"- {role}: {profile_name} (unresolved)")
+            continue
+        model = profile.model or "(provider default)"
+        lines.append(
+            f"- {role}: {profile.name} → {profile.provider}/{model} "
+            f"reasoning={profile.reasoning} access={profile.access}"
+        )
+    return "\n".join(lines)
+
+
 def _launch(args: argparse.Namespace) -> int:
     if importlib.util.find_spec("mcp") is None:
         print(
@@ -506,8 +644,11 @@ def _launch(args: argparse.Namespace) -> int:
         "billing_class": profile.billing_class,
         "session_id": session_id,
     }
-    if args.prompt:
-        metadata["host_prompt"] = args.prompt
+    contract = _orchestrator_contract(config, preset=args.preset)
+    metadata["host_prompt"] = (
+        contract + "\n\nInitial user task:\n" + args.prompt
+        if args.prompt else contract
+    )
 
     host_task = TaskSpec(
         objective="Interactive CortexRelay orchestration session",
@@ -557,6 +698,16 @@ def _delegate(args: argparse.Namespace) -> int:
         acceptance_criteria=tuple(args.acceptance_criteria),
         timeout_seconds=args.timeout_seconds,
         isolate_write=args.access == "workspace_write" and args.isolate_write,
+        budget=TaskBudget(
+            max_tokens=args.max_tokens,
+            max_cost=args.max_cost,
+        ),
+        quality_gates=QualityGates(
+            require_changed_files=args.require_changed_files,
+            require_tests=args.require_tests,
+            allowed_paths=tuple(args.allowed_paths),
+            max_failed_tests=args.max_failed_tests,
+        ),
     )
     result = default_registry().execute(task)
     if args.as_json:
@@ -769,6 +920,12 @@ def main(argv: list[str] | None = None) -> int:
         return _status(args)
     if args.command == "history":
         return _status(args, completed_only=True)
+    if args.command == "group":
+        return _group(args)
+    if args.command == "analyze-routing":
+        return _analyze_routing(args)
+    if args.command == "gc":
+        return _gc(args)
     if args.command == "models":
         return _models(args)
     if args.command == "launch":

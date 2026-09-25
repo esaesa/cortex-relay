@@ -1,6 +1,6 @@
 # Runtime delegation
 
-CortexRelay 0.8 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI through the same provider-neutral runtime, with direct CLI, MCP, and A2A frontends.
+CortexRelay 0.9 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI through the same provider-neutral runtime, with direct CLI, MCP, and A2A frontends.
 
 The primary coding agent remains the orchestrator. CortexRelay does not attempt to replace its planning loop. It receives an already-bounded task, applies deterministic routing policy, executes the selected provider, and returns a compact normalized result.
 
@@ -370,6 +370,67 @@ Read-only tasks additionally compare git status before and after the run. Any wo
 
 CortexRelay intentionally does not pass Antigravity's global auto-approval flag. Provider permissions should remain scoped by the user's Antigravity configuration.
 
+## Artifact-aware workflow control
+
+Async dependency groups now carry workflow state as well as ordering.
+
+A successful isolated write task can persist an immutable artifact with:
+- source task ID and artifact ID;
+- recorded base commit and worker HEAD;
+- complete binary patch digest and patch file;
+- changed files;
+- provider/model and tests;
+- normalized result digest.
+
+Pass `inherit_workspace_from=<task-id>` on a downstream async task and include that task ID in `depends_on`. After the dependency succeeds, CortexRelay creates/loads its artifact and applies it to the downstream task's fresh worktree before launching the provider. The user's source checkout stays untouched. Inheritance also works for read-only downstream workers.
+
+Every async task receives provider-neutral trace metadata. A child may name `parent_task_id`; CortexRelay carries the trace/root IDs, ancestry, depth and `max_depth`, rejecting loops or excessive nesting.
+
+Quality gates are workflow-level acceptance checks after provider execution. A provider can finish successfully while CortexRelay records `failed_gate` when required changed files/tests/review evidence are absent, changed paths exceed the allowed scope, or failed-test limits are exceeded.
+
+Task budgets can cap tokens and provider-reported cost. Live token events request cancellation when a task crosses its token budget; final normalized usage is checked again. Project-level budgets can cap group/session tokens and premium task counts before new work starts.
+
+The scheduler is configurable:
+
+```toml
+[scheduler]
+max_workers = 6
+
+[scheduler.providers]
+opencode = 3
+antigravity = 2
+codex = 1
+
+[scheduler.profiles]
+premium-review = 1
+```
+
+Queued tasks expose `queue_position` and `queued_reason`, such as a dependency wait or provider concurrency saturation. Higher `priority` values are considered first.
+
+State retention is configurable:
+
+```toml
+[state]
+retention_days = 30
+max_completed_tasks = 1000
+max_event_log_mb = 10
+cleanup_on_start = true
+```
+
+Use `cortex-relay gc --dry-run` before pruning. Active tasks, their required dependency records, and Git worktrees are never deleted by state GC.
+
+Workflow inspection:
+
+```bash
+cortex-relay group feature-auth
+cortex-relay group feature-auth --watch
+cortex-relay analyze-routing
+```
+
+Routing analysis is descriptive only: success/fallback/gate/budget rates plus median duration, tokens and provider-reported cost. CortexRelay does not automatically rewrite route configuration from these metrics.
+
+A2A execution now forwards the same bounded normalized progress events used by MCP/terminal observability as repeated working-status messages.
+
 ## MCP
 
 Install the optional MCP dependency, then run a local stdio server:
@@ -402,6 +463,7 @@ The MCP surface is deliberately small:
 - `task_wait`
 - `task_cancel`
 - `tasks`
+- `task_artifact`
 - `task_worktree`
 - `task_diff`
 - `task_apply`
@@ -409,7 +471,7 @@ The MCP surface is deliberately small:
 
 `delegate` and `delegate_parallel` are synchronous: the MCP request waits for the provider work to finish. Use them for short, bounded tasks. A client-side timeout does not cancel workers already launched by `delegate_parallel` and may prevent their results from reaching the caller. For longer work or parallel orchestration, call `delegate_async` for each task and retain the returned task IDs. Each task may choose a profile or an explicit `opencode`, `codex`, or `antigravity` provider; write-capable tasks are isolated into separate git worktrees by default.
 
-`delegate_async` starts a task and immediately returns its full task ID. Use `task_status` to read the latest observable tool activity and `task_events(task_id, after_sequence=0, limit=20)` to fetch subsequent events with a cursor. Pass the returned `next_sequence` into the next `task_events` call. `task_wait` retrieves the full normalized result (`timeout_seconds=0` polls), and `task_cancel` requests cancellation. Each `task_wait` call waits at most five seconds so it stays within MCP client request deadlines, even if given a larger value. `tasks(workspace=".", group_id=None)` lists persisted async jobs in a workspace. Set `access=workspace_write` explicitly for implementation tasks. The synchronous `delegate` tool remains available.
+`delegate_async` starts a task and immediately returns its full task ID. It also accepts dependency inheritance, priority, trace-parent/depth, budgets and quality-gate inputs. Use `task_status` to read the latest observable tool activity and `task_events(task_id, after_sequence=0, limit=20)` to fetch subsequent events with a cursor. Pass the returned `next_sequence` into the next `task_events` call. `task_wait` retrieves the full normalized result (`timeout_seconds=0` polls), and `task_cancel` requests cancellation. Each `task_wait` call waits at most five seconds so it stays within MCP client request deadlines, even if given a larger value. `tasks(workspace=".", group_id=None)` lists persisted async jobs in a workspace. Set `access=workspace_write` explicitly for implementation tasks. The synchronous `delegate` tool remains available.
 
 Async task identity, status, events, and the complete normalized result are stored on disk. A new MCP server can inspect a completed task by ID and return its exact result. If the owning server exits while a task is active or queued, the task becomes `interrupted`; CortexRelay does not resume or kill the unknown worker. A task still owned by a live other server stays active, and `task_cancel` reports `owned_elsewhere` from this server. Older terminal records without full results return `result_unavailable`. Queued tasks are not relaunched automatically after owner loss. The dashboard and MCP status expose observable activity, not model reasoning. Antigravity uses its `stream-json` events, while OpenCode and Codex use their existing JSON event streams.
 

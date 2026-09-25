@@ -192,9 +192,84 @@ Runtime state is intentionally stored outside the Git checkout. On Windows the d
 
 State writes are best-effort only: an unavailable or unwritable observability directory never causes a delegated coding task to fail.
 
+## Artifact-aware workflow DAGs
+
+Version 0.9 makes dependency groups pass **exact code state**, not only completion status.
+
+A successful isolated write task can produce an immutable artifact containing the complete binary Git patch, base commit, changed files, result digest, provider/model metadata, and tests. A downstream task can depend on that task and inherit its artifact into a fresh worktree:
+
+```text
+implementer
+  ↓ immutable artifact A
+tester
+  ↓ inherits A in its own worktree
+reviewer
+  ↓ can inspect the exact tested state
+explicit task_apply
+```
+
+The source checkout is not modified by inheritance. Read-only reviewers can receive inherited artifacts too: CortexRelay creates a temporary worktree containing the upstream patch while keeping the provider read-only.
+
+Async MCP tasks support:
+- `group_id` and `depends_on`;
+- `inherit_workspace_from`;
+- `priority`;
+- parent/trace depth protection;
+- task token/cost budgets;
+- quality gates for changed files, tests, allowed paths, failed-test limits, and review dependencies;
+- workspace/provider/profile concurrency limits.
+
+Inspect a workflow rather than individual task rows:
+
+```bash
+cortex-relay group feature-auth
+cortex-relay group feature-auth --watch
+```
+
+Inspect historical route outcomes without changing routing:
+
+```bash
+cortex-relay analyze-routing
+```
+
+Prune old terminal state without deleting worker worktrees:
+
+```bash
+cortex-relay gc --dry-run
+cortex-relay gc
+```
+
+Optional project policy:
+
+```toml
+[scheduler]
+max_workers = 6
+
+[scheduler.providers]
+opencode = 3
+antigravity = 2
+codex = 1
+
+[scheduler.profiles]
+premium-review = 1
+
+[budgets]
+max_session_tokens = 500000
+max_group_tokens = 150000
+max_premium_tasks = 3
+
+[state]
+retention_days = 30
+max_completed_tasks = 1000
+max_event_log_mb = 10
+cleanup_on_start = true
+```
+
+`cortex-relay launch` also injects an orchestrator contract generated from the effective role/profile map so the host knows which resources exist, prefers async DAG workflows for substantial work, uses event cursors for progress, and inspects diffs before explicit handoff.
+
 ## Runtime delegation
 
-Version 0.8 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI as provider-neutral runtime workers, exposed through direct CLI delegation, MCP, and an A2A server for remote agents such as Gemini CLI.
+Version 0.9 supports OpenCode, Antigravity CLI, and OpenAI Codex CLI as provider-neutral runtime workers, exposed through direct CLI delegation, MCP, and an A2A server for remote agents such as Gemini CLI.
 
 ```text
 Primary coding agent
@@ -252,7 +327,7 @@ python -m pip install -e ".[mcp]"
 cortex-relay serve --transport mcp
 ```
 
-The MCP surface includes `providers`, `profiles`, `status`, `history`, `delegate`, `delegate_parallel`, `delegate_async`, `task_status`, `task_events`, `task_wait`, `task_cancel`, `tasks`, `task_worktree`, `task_diff`, `task_apply`, and `task_discard`. OpenCode, Codex, and Antigravity are available through the same tools when their CLIs are installed. Async task IDs and complete results survive MCP restarts. Use `status --watch -v` for recent actions, `-vv` for bounded output previews, `task_events` for cursor-based updates, and `task_wait` for the full result. Dependent tasks can be queued with `depends_on` and viewed by `group_id`. Finished isolated worktrees can be inspected with `task_worktree` and `task_diff`, then explicitly applied or discarded.
+The MCP surface includes `providers`, `profiles`, `status`, `history`, `delegate`, `delegate_parallel`, `delegate_async`, `task_status`, `task_events`, `task_wait`, `task_cancel`, `tasks`, `task_artifact`, `task_worktree`, `task_diff`, `task_apply`, and `task_discard`. OpenCode, Codex, and Antigravity are available through the same tools when their CLIs are installed. Async task IDs and complete results survive MCP restarts. Use `status --watch -v` for recent actions, `-vv` for bounded output previews, `task_events` for cursor-based updates, and `task_wait` for the full result. Dependent tasks can be queued with `depends_on` and viewed by `group_id`. Finished isolated worktrees can be inspected with `task_worktree` and `task_diff`, then explicitly applied or discarded.
 
 See [Runtime delegation](docs/runtime.md) and [Architecture](docs/architecture.md) for the shared MCP/A2A runtime design.
 

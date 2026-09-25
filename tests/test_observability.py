@@ -216,6 +216,55 @@ class ObservabilityTests(unittest.TestCase):
             self.assertEqual(len(tasks), 1)
             self.assertEqual(tasks[0]["task_id"], active_id)
 
+    def test_gc_prunes_old_terminal_state_but_keeps_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "repo"
+            workspace.mkdir()
+            store = RunStore(root / "state")
+
+            old_id = store.start_task(
+                TaskSpec(objective="old", workspace=workspace),
+                async_task=True,
+            )
+            store.complete_task(
+                workspace,
+                old_id,
+                TaskResult(status="success", provider="fake", summary="done"),
+            )
+            store.update_task(
+                workspace,
+                old_id,
+                completed_at="2020-01-01T00:00:00+00:00",
+            )
+
+            active_id = store.start_task(
+                TaskSpec(objective="active", workspace=workspace),
+                async_task=True,
+            )
+            store.update_task(workspace, active_id, status="running")
+
+            preview = store.gc(
+                workspace=workspace,
+                retention_days=1,
+                max_completed_tasks=100,
+                max_event_log_mb=10,
+                dry_run=True,
+            )
+            self.assertEqual(preview["count"], 1)
+            self.assertEqual(preview["tasks"][0]["task_id"], old_id)
+
+            result = store.gc(
+                workspace=workspace,
+                retention_days=1,
+                max_completed_tasks=100,
+                max_event_log_mb=10,
+                dry_run=False,
+            )
+            self.assertEqual(result["count"], 1)
+            self.assertIsNone(store.get_task(workspace, old_id))
+            self.assertIsNotNone(store.get_task(workspace, active_id))
+
     def test_state_is_outside_workspace_and_write_failures_are_nonfatal(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "repo"

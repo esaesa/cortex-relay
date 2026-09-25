@@ -115,6 +115,41 @@ class ProfileConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cycle"):
             cyclic.fallback_chain(cyclic.profiles["a"])
 
+    def test_scheduler_budget_and_state_policy_parse(self):
+        config = runtime_config_from_mapping(
+            {
+                "scheduler": {
+                    "max_workers": 6,
+                    "providers": {"opencode": 3, "codex": 1},
+                    "profiles": {"premium": 1},
+                },
+                "budgets": {
+                    "max_session_tokens": 500000,
+                    "max_group_tokens": 150000,
+                    "max_premium_tasks": 3,
+                },
+                "state": {
+                    "retention_days": 14,
+                    "max_completed_tasks": 250,
+                    "max_event_log_mb": 8,
+                    "cleanup_on_start": False,
+                },
+            }
+        )
+
+        self.assertEqual(config.scheduler.max_workers, 6)
+        self.assertEqual(config.scheduler.provider_limits["opencode"], 3)
+        self.assertEqual(config.scheduler.profile_limits["premium"], 1)
+        self.assertEqual(config.budgets.max_group_tokens, 150000)
+        self.assertEqual(config.state.retention_days, 14)
+        self.assertFalse(config.state.cleanup_on_start)
+
+    def test_invalid_scheduler_limit_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "positive"):
+            runtime_config_from_mapping(
+                {"scheduler": {"providers": {"codex": 0}}}
+            )
+
     def test_project_overrides_user_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

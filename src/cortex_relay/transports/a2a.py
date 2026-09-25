@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import ipaddress
 import json
+import queue
 import re
 import threading
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ from typing import Any
 from cortex_relay import __version__
 from cortex_relay.core.models import TaskAccess, TaskResult, TaskSpec
 from cortex_relay.core.registry import ProviderRegistry, default_registry
+from cortex_relay.runtime.progress import ProgressEvent
 
 
 _AGENT_SLUG_RE = re.compile(r"^[a-z0-9_-]+$")
@@ -116,12 +118,15 @@ class A2AServerPolicy:
         objective: str,
         *,
         cancel_event: threading.Event | None = None,
+        progress_callback: Any | None = None,
     ) -> TaskSpec:
         metadata: dict[str, Any] = {
             "transport": "a2a",
         }
         if cancel_event is not None:
             metadata["_cancel_event"] = cancel_event
+        if callable(progress_callback):
+            metadata["_external_progress"] = progress_callback
         return TaskSpec(
             objective=objective,
             role=self.role,
@@ -206,15 +211,49 @@ class CortexRelayA2AExecutor(AgentExecutor):  # type: ignore[misc]
         with self._cancel_lock:
             self._cancel_events[task_id] = cancel_event
 
+        progress_events: queue.Queue[ProgressEvent] = queue.Queue()
+
+        def on_progress(event: ProgressEvent) -> None:
+            progress_events.put(event)
+
         spec = self.policy.task_spec_for(
             objective,
             cancel_event=cancel_event,
+            progress_callback=on_progress,
         )
 
+        worker = asyncio.create_task(asyncio.to_thread(self.registry.execute, spec))
         try:
-            result = await asyncio.to_thread(self.registry.execute, spec)
+            while not worker.done():
+                emitted = 0
+                while emitted < 8:
+                    try:
+                        progress = progress_events.get_nowait()
+                    except queue.Empty:
+                        break
+                    emitted += 1
+                    await updater.update_status(
+                        TaskState.TASK_STATE_WORKING,
+                        message=updater.new_agent_message(
+                            parts=[Part(text=_a2a_progress_text(progress))]
+                        ),
+                    )
+                await asyncio.sleep(0.25)
+            result = await worker
+            while True:
+                try:
+                    progress = progress_events.get_nowait()
+                except queue.Empty:
+                    break
+                await updater.update_status(
+                    TaskState.TASK_STATE_WORKING,
+                    message=updater.new_agent_message(
+                        parts=[Part(text=_a2a_progress_text(progress))]
+                    ),
+                )
         except asyncio.CancelledError:
             cancel_event.set()
+            worker.cancel()
             raise
         except Exception as exc:
             message = updater.new_agent_message(
@@ -280,6 +319,23 @@ class CortexRelayA2AExecutor(AgentExecutor):  # type: ignore[misc]
         )
         with contextlib.suppress(RuntimeError):
             await updater.cancel(message=message)
+
+
+def _a2a_progress_text(event: ProgressEvent) -> str:
+    parts = [event.activity]
+    if event.tool:
+        parts.append(f"tool={event.tool}")
+    if event.command:
+        parts.append(f"command={event.command}")
+    elif event.path:
+        parts.append(f"path={event.path}")
+    if event.exit_code is not None:
+        parts.append(f"exit={event.exit_code}")
+    if event.error_preview:
+        parts.append(f"diagnostic={event.error_preview}")
+    elif event.output_preview:
+        parts.append(f"result={event.output_preview}")
+    return "CortexRelay progress: " + " | ".join(parts)
 
 
 def a2a_available() -> bool:
