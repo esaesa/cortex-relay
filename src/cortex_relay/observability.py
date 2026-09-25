@@ -970,6 +970,13 @@ class RunStore:
             except OSError:
                 continue
 
+        agent_gc = AgentStore(self.root).gc(
+            workspace=workspace,
+            retention_days=retention_days,
+            max_completed_roots=max_completed_tasks,
+            dry_run=dry_run,
+        )
+
         return {
             "dry_run": dry_run,
             "workspace": str(_workspace(workspace)) if workspace is not None else None,
@@ -978,6 +985,8 @@ class RunStore:
             "max_event_log_mb": max_event_log_mb,
             "count": len(planned),
             "tasks": planned,
+            "agent_count": agent_gc["count"],
+            "agents": agent_gc["agents"],
         }
 
     def _remove_artifact_files(self, record: dict[str, Any]) -> None:
