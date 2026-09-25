@@ -41,6 +41,10 @@ class ProviderAdapter(ABC):
     def execute(self, task: TaskSpec) -> TaskResult:
         raise NotImplementedError
 
+    def execute_session(self, task: TaskSpec) -> TaskResult:
+        """Execute one turn using the provider's preferred session transport."""
+        return self.execute(task)
+
     def continue_session(self, task: TaskSpec, provider_session_id: str) -> TaskResult:
         """Continue a provider-backed session.
 
