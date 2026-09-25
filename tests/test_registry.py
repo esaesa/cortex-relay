@@ -319,6 +319,29 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(registry.provider_health("antigravity")["timeouts"], 1)
         self.assertEqual(registry.provider_health("codex")["successes"], 1)
 
+    def test_auto_routing_with_explicit_model_does_not_cross_providers(self):
+        primary = FakeProvider("antigravity", status="timeout")
+        backup = FakeProvider("codex", status="success")
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = ProviderRegistry(
+                [primary, backup],
+                profiles=StaticResolver({}),
+                run_store=RunStore(Path(tmp) / "state"),
+            )
+            result = registry.execute(
+                TaskSpec(
+                    objective="Inspect",
+                    provider="auto",
+                    model="provider-specific-model",
+                    workspace=Path(tmp),
+                )
+            )
+
+        self.assertEqual(result.status, "timeout")
+        self.assertEqual(result.provider, "antigravity")
+        self.assertEqual(len(result.metadata["auto_routing_attempts"]), 1)
+        self.assertIsNone(backup.last_task)
+
     def test_repeated_tool_budget_stops_worker_semantically(self):
         provider = RepeatingToolProvider()
         with tempfile.TemporaryDirectory() as tmp:
