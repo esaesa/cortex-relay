@@ -393,6 +393,7 @@ class RunStore:
                 model=record.get("model"),
                 summary="Task control was lost when its MCP owner stopped.",
                 error="No provider completion was observed; the worker was not resumed or killed.",
+                termination_reason="owner_lost",
                 metadata={"task_id": task_id},
             ).to_dict()
             self._write_record(result_path, result, required=True)
@@ -411,6 +412,7 @@ class RunStore:
             completed_at=now, updated_at=now, process_alive=False,
             summary=_truncate(str(result.get("summary") or ""), 420),
             error=_truncate(str(result["error"]), 420) if result.get("error") else None,
+            termination_reason=result.get("termination_reason"),
             provider=result.get("provider", record.get("provider")),
             model=result.get("model", record.get("model")),
             duration_seconds=result.get("duration_seconds"),
