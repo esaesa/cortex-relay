@@ -199,7 +199,7 @@ cortex-relay history --clear
 
 Runtime state is intentionally stored outside the Git checkout. On Windows the default is under `%LOCALAPPDATA%\CortexRelay\state`; on Unix-like systems CortexRelay uses `$XDG_STATE_HOME/cortex-relay` or `~/.local/state/cortex-relay`. Set `CORTEX_RELAY_STATE_DIR` to override it.
 
-State writes are best-effort only: an unavailable or unwritable observability directory never causes a delegated coding task to fail.
+Workflow observability remains defensive, but durable agent-session state is now control-plane state rather than optional telemetry. Direct sessions require a writable CortexRelay state directory so session identity, event/message cursors, leases, cancellation ownership, and results cannot silently disappear.
 
 ## Artifact-aware workflow DAGs
 
@@ -306,7 +306,9 @@ Primary coding agent
 
 The calling agent remains the orchestrator. CortexRelay owns deterministic routing, session control, event persistence, child topology, workspace isolation, and normalized results rather than adding another planning model.
 
-The MCP surface now includes direct agent controls: `agent_start`, `agent_start_async`, `agent_wait`, `agent_result`, `agents`, `agent_get`, `agent_events`, `agent_messages`, `agent_children`, `agent_send`, and `agent_close`. Use `agent_start_async` for independent parallel persistent specialists, `agent_start` when the first turn is immediately required, and `delegate_async` only when you need DAG scheduling, worktree isolation, budgets, quality gates, or artifact lineage. Direct-agent `access=auto` inherits the selected profile's access. Completed task results expose `agent_session_id`, while `task_output` remains the lossless chunked final-answer channel.
+Direct-agent control state is persisted transactionally in a local SQLite database using WAL mode. Event and message sequences are allocated atomically, provider-session lookup and child traversal are indexed, and each active direct turn owns a renewable lease. A new runtime reconciles expired leases to `interrupted` instead of leaving zombie sessions marked running. This is the production-grade **single-host** backend; multi-host/multi-replica deployment should use a future external AgentStore backend rather than sharing the SQLite file over a network filesystem.
+
+The MCP surface now includes direct agent controls: `agent_start`, `agent_start_async`, `agent_wait`, `agent_watch`, `agent_result`, `agents`, `agent_get`, `agent_events`, cursor-based `agent_messages`, `agent_children`, `agent_send`, provider-backed `agent_cancel`, and `agent_close`. Use `agent_start_async` for independent parallel persistent specialists, `agent_start` when the first turn is immediately required, and `delegate_async` only when you need DAG scheduling, worktree isolation, budgets, quality gates, or artifact lineage. Direct-agent `access=auto` inherits the selected profile's access. Completed task results expose `agent_session_id`, while `task_output` remains the lossless chunked final-answer channel.
 
 Inspect runtime providers:
 
@@ -341,7 +343,7 @@ python -m pip install -e ".[mcp]"
 cortex-relay serve --transport mcp
 ```
 
-The MCP surface includes `providers`, `profiles`, `status`, `history`, `agent_start`, `agents`, `agent_get`, `agent_events`, `agent_messages`, `agent_children`, `agent_send`, `agent_close`, `delegate`, `delegate_parallel`, `delegate_async`, `task_status`, `task_events`, `task_wait`, `task_output`, `task_cancel`, `tasks`, `task_artifact`, `task_worktree`, `task_diff`, `task_apply`, and `task_discard`. OpenCode, Codex, and Antigravity are available through the same tools when their CLIs are installed. Every successful result carries both a compact `summary` and the worker's complete `final_text`. Async task IDs, normalized results, and complete child final answers survive MCP restarts. Use `status --watch -v` for recent actions, `-vv` for bounded output previews, `task_events` for cursor-based updates, `task_wait` for the complete result object, and `task_output` to page through large final answers without truncation. Dependent tasks can be queued with `depends_on` and viewed by `group_id`. Finished isolated worktrees can be inspected with `task_worktree` and `task_diff`, then explicitly applied or discarded.
+The MCP surface includes `providers`, `profiles`, `status`, `history`, `agent_start`, `agent_start_async`, `agent_wait`, `agent_watch`, `agent_result`, `agents`, `agent_get`, `agent_events`, `agent_messages`, `agent_children`, `agent_send`, `agent_cancel`, `agent_close`, `delegate`, `delegate_parallel`, `delegate_async`, `task_status`, `task_events`, `task_wait`, `task_output`, `task_cancel`, `tasks`, `task_artifact`, `task_worktree`, `task_diff`, `task_apply`, and `task_discard`. OpenCode, Codex, and Antigravity are available through the same tools when their CLIs are installed. Every successful result carries both a compact `summary` and the worker's complete `final_text`. Async task IDs, normalized results, and complete child final answers survive MCP restarts. Use `status --watch -v` for recent actions, `-vv` for bounded output previews, `task_events` for cursor-based updates, `task_wait` for the complete result object, and `task_output` to page through large final answers without truncation. Dependent tasks can be queued with `depends_on` and viewed by `group_id`. Finished isolated worktrees can be inspected with `task_worktree` and `task_diff`, then explicitly applied or discarded.
 
 See [Runtime delegation](docs/runtime.md) and [Architecture](docs/architecture.md) for the shared MCP/A2A runtime design.
 
