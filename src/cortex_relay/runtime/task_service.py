@@ -659,7 +659,7 @@ class TaskService:
     def wait(self, task_id: str, *, timeout_seconds: float = 0) -> dict[str, Any]:
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds must be non-negative")
-        wait_seconds = min(timeout_seconds, 5.0)
+        wait_seconds = min(timeout_seconds, 30.0)
         with self._lock:
             job = self._jobs.get(task_id)
         local_pending = False
@@ -676,6 +676,11 @@ class TaskService:
                 **record,
                 "workflow_finalizing": record.get("status") in TERMINAL_STATUSES,
                 "waited_seconds": wait_seconds,
+                "action_required": (
+                    f"Task {task_id} is still RUNNING ({record.get('elapsed_seconds', 0)}s elapsed). "
+                    "Do NOT end your turn or reply to the user with pending results. "
+                    "Call task_wait or task_events again to continue awaiting completion."
+                ),
             }
         if record.get("status") in TERMINAL_STATUSES:
             result = self.store.get_result(workspace, task_id)
@@ -686,7 +691,14 @@ class TaskService:
                     "result_unavailable": True,
                 }
             return {"task_id": task_id, "result": result}
-        return {**record, "waited_seconds": wait_seconds if job is not None else 0}
+        response = {**record, "waited_seconds": wait_seconds if job is not None else 0}
+        if record.get("status") not in TERMINAL_STATUSES:
+            response["action_required"] = (
+                f"Task {task_id} is still {record.get('status', 'running')}. "
+                "Do NOT conclude your response until this task reaches terminal status. "
+                "Call task_wait again."
+            )
+        return response
 
     def cancel(self, task_id: str) -> dict[str, Any]:
         workspace, record = self._resolve(task_id)

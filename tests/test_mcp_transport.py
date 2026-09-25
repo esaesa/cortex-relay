@@ -73,6 +73,15 @@ class MCPTransportMappingTests(unittest.TestCase):
                 isolate_write=False,
             )
 
+    def test_server_instructions_and_tool_descriptions(self):
+        from cortex_relay.transports.mcp import create_server
+        server = create_server()
+        self.assertIn("synchronous delegate", server.instructions)
+        self.assertIn("Never end a turn with uncompleted async tasks", server.instructions)
+        tool = next(t for t in server._tool_manager.list_tools() if t.name == "task_wait")
+        self.assertIn("up to 30 seconds", tool.description)
+        self.assertIn("terminal status", tool.description)
+
 
 if __name__ == "__main__":
     unittest.main()

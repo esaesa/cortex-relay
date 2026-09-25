@@ -31,11 +31,10 @@ def create_server(
         instructions=(
             "Delegate bounded coding-agent work to registered external providers. "
             "The calling agent remains responsible for planning and final synthesis. "
-            "delegate and delegate_parallel are synchronous and should be limited to short, "
-            "bounded work. Use delegate_async for longer or parallel work, then task_status, task_events, "
-            "short task_wait polls, or task_cancel by task ID. Never pass a provider "
-            "timeout to task_wait. Set access=workspace_write "
-            "explicitly for implementation tasks. Use status/history to inspect work."
+            "Use synchronous delegate when you need the worker's output before you can answer the user's immediate request. "
+            "Use delegate_async for parallel work or staged pipelines, then poll task_wait until the task reaches terminal status. "
+            "Never end a turn with uncompleted async tasks when the user is awaiting the outcome. "
+            "Set access=workspace_write explicitly for implementation tasks. Use status/history to inspect work."
         ),
     )
 
@@ -204,7 +203,7 @@ def create_server(
 
     @server.tool()
     def task_wait(task_id: str, timeout_seconds: float = 0) -> dict[str, Any]:
-        """Return the result or progress after at most five seconds per call."""
+        """Wait for task progress or result (up to 30 seconds per call). If the task is still running, call task_wait again until terminal status is reached."""
         return async_tasks.wait(task_id, timeout_seconds=timeout_seconds)
 
     @server.tool()

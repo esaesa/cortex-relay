@@ -297,6 +297,37 @@ class WorkflowControlTests(unittest.TestCase):
             self.assertEqual(report["routes"][0]["success_rate"], 1.0)
             self.assertIn("does not automatically", report["note"])
 
+    def test_wait_pending_task_returns_action_required_guidance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _init_repo(root)
+            proceed = threading.Event()
+
+            class BlockingProvider(WorkflowProvider):
+                def execute(self, task):
+                    proceed.wait(timeout=2)
+                    return super().execute(task)
+
+            provider = BlockingProvider()
+            registry = self._registry(repo, root / "state", provider)
+            service = TaskService(registry)
+            try:
+                task = service.submit(
+                    TaskSpec(
+                        objective="block",
+                        role="implementer",
+                        workspace=repo,
+                        access="workspace_write",
+                    )
+                )
+                response = service.wait(task["task_id"], timeout_seconds=0.01)
+                self.assertIn("action_required", response)
+                self.assertIn("still RUNNING", response["action_required"])
+                self.assertNotIn("result", response)
+            finally:
+                proceed.set()
+                service.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()

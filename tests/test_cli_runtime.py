@@ -362,6 +362,21 @@ class CLIRuntimeTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("not found", stderr.getvalue())
 
+    def test_orchestrator_contract_contains_completion_rules(self):
+        from cortex_relay.cli import _orchestrator_contract
+        from cortex_relay.core.profiles import runtime_config_from_mapping
+
+        config = runtime_config_from_mapping(
+            {
+                "profiles": {"muse": {"provider": "opencode", "model": "muse"}},
+                "roles": {"orchestrator": "muse"},
+            }
+        )
+        contract = _orchestrator_contract(config)
+        self.assertIn("synchronous delegate", contract)
+        self.assertIn("terminal status", contract)
+        self.assertIn("Never end your turn with an interim 'pending' status", contract)
+
 
 if __name__ == "__main__":
     unittest.main()

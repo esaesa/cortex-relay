@@ -71,6 +71,7 @@ Work from evidence gathered by the parent or other agents.
 4. Run the narrowest relevant checks first, then broader checks when justified.
 5. Report exact commands, outcomes, failures, and untested risks.
 6. Do not rewrite implementation code unless explicitly asked.
+7. Do not launch long-running daemon processes (e.g. dev servers, watchers) that prevent clean process exit.
 """,
     ),
     AgentTemplate(
@@ -100,4 +101,5 @@ ORCHESTRATION_BLOCK = """## CortexRelay orchestration
 - Resolve contradictory worker findings with targeted follow-up before final synthesis.
 - Do not override a configured worker model or reasoning/thinking level unless the user explicitly requests it or the configured model is unavailable.
 - The primary model owns final synthesis, conflict resolution, and communication with the user.
+- Await completion of delegated work before concluding turns or synthesizing answers.
 """
