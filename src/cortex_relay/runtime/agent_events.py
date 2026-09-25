@@ -72,6 +72,7 @@ def _antigravity(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ..
                     else "failed",
                     "usage": result.get("usage"),
                     "duration_seconds": result.get("duration_seconds"),
+                    "error": result.get("error"),
                 },
                 kind,
             ),
@@ -104,7 +105,12 @@ def _antigravity(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ..
             _event(
                 session_id,
                 "child_update",
-                child,
+                {
+                    **child,
+                    "step_index": step.get("step_index"),
+                    "duration_seconds": step.get("duration_seconds"),
+                    "usage": step.get("usage"),
+                },
                 "step_update",
             )
         )
@@ -124,6 +130,8 @@ def _antigravity(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ..
                     "output": info.get("output"),
                     "error": info.get("error"),
                     "step_index": step.get("step_index"),
+                    "duration_seconds": step.get("duration_seconds"),
+                    "usage": step.get("usage"),
                 },
                 "step_update",
             )
@@ -216,7 +224,14 @@ def _codex(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ...]:
                     )
             child = _codex_child(item)
             if child is not None:
-                return (_event(session_id, "child_update", child, method),)
+                return (
+                    _event(
+                        session_id,
+                        "child_update",
+                        {**child, "item": item, "item_type": item_type},
+                        method,
+                    ),
+                )
             return (
                 _event(
                     session_id,
@@ -277,7 +292,18 @@ def _codex(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ...]:
             ) if isinstance(text, str) and text else ()
         child = _codex_child(item)
         if child is not None:
-            return (_event(session_id, "child_update", child, kind),)
+            return (
+                _event(
+                    session_id,
+                    "child_update",
+                    {
+                        **child,
+                        "item": item,
+                        "item_type": item.get("type"),
+                    },
+                    kind,
+                ),
+            )
         return (
             _event(
                 session_id,
@@ -328,7 +354,10 @@ def _opencode(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ...]:
             _event(
                 session_id,
                 "lifecycle",
-                {"state": "running" if kind == "step_start" else "idle"},
+                {
+                    "state": "running" if kind == "step_start" else "idle",
+                    "usage": part.get("tokens"),
+                },
                 kind,
             )
         )
@@ -349,6 +378,7 @@ def _opencode(event: dict[str, Any], session_id: str) -> tuple[AgentEvent, ...]:
                     "output": state.get("output"),
                     "error": state.get("error"),
                     "metadata": state.get("metadata"),
+                    "time": state.get("time"),
                 },
                 kind,
             )
