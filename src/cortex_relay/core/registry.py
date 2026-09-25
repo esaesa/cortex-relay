@@ -156,6 +156,10 @@ class ProviderRegistry:
                 source=source,
             )
             last = result
+            if result.metadata.get("agent_session_id"):
+                # A direct persistent session has acquired identity. Never silently
+                # replace it with a different provider/session after launch.
+                return result
             if result.ok or result.status == "cancelled":
                 return result
             if result.status not in candidate.fallback_on:
