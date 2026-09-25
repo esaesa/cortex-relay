@@ -217,6 +217,41 @@ class AgentServiceTests(unittest.TestCase):
             self.assertIn("agent_session_id", result)
             self.assertFalse(alternate.executed)
 
+    def test_watch_returns_visible_updates_and_authoritative_running_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            provider = SlowSessionProvider()
+            registry = ProviderRegistry(
+                [provider],
+                run_store=RunStore(root / "state"),
+            )
+            service = AgentService(registry)
+
+            started = service.start_async(
+                objective="inspect with updates",
+                provider="fake",
+                workspace=workspace,
+                timeout_seconds=60,
+            )
+            session_id = started["agent_session_id"]
+
+            watched = service.watch(
+                session_id,
+                after_sequence=0,
+                timeout_seconds=1,
+            )
+            self.assertFalse(watched["complete"])
+            self.assertTrue(watched["authoritative_session"])
+            self.assertFalse(watched["replacement_recommended"])
+            self.assertTrue(watched["updates"])
+            self.assertGreaterEqual(watched["next_sequence"], 1)
+
+            provider.release.set()
+            completed = service.wait(session_id, timeout_seconds=5)
+            self.assertTrue(completed["complete"])
+
     def test_start_async_returns_session_before_turn_finishes_and_wait_is_durable(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
