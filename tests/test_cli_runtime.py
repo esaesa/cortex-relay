@@ -373,9 +373,14 @@ class CLIRuntimeTests(unittest.TestCase):
             }
         )
         contract = _orchestrator_contract(config)
-        self.assertIn("synchronous delegate", contract)
-        self.assertIn("terminal status", contract)
-        self.assertIn("Never end your turn with an interim 'pending' status", contract)
+        self.assertIn("Prefer provider-native persistent agent sessions", contract)
+        self.assertIn("closed-end delegation only", contract)
+        self.assertIn("Provider-native subagents are allowed", contract)
+        self.assertIn("Every discovered child agent must be mirrored", contract)
+        self.assertIn("Never conclude merely because required work is still pending", contract)
+        self.assertIn("Configured roles:", contract)
+        self.assertNotIn("Use synchronous delegate", contract)
+        self.assertNotIn("Do not bypass them with native subagents", contract)
 
 
 if __name__ == "__main__":

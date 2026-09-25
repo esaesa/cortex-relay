@@ -31,14 +31,15 @@ def create_server(
     server = MCPServer(
         "CortexRelay",
         instructions=(
-            "Delegate bounded coding-agent work to registered external providers. "
-            "The calling agent remains responsible for planning and final synthesis. "
-            "Use synchronous delegate when you need the worker's output before you can answer the user's immediate request. "
-            "Use delegate_async for parallel work or staged pipelines, then poll task_wait until the task reaches terminal status. "
-            "Successful results include final_text with the worker's complete answer and agent_session_id with the durable provider-backed session. "
-            "Use agent_events for rich live activity, agent_children for provider-native or Cortex-managed children, and agent_send to continue a resumable session. "
-            "For large answers use task_output to retrieve them in chunks. Never end a turn with uncompleted async tasks when the user is awaiting the outcome. "
-            "Set access=workspace_write explicitly for implementation tasks. Use status/history to inspect work."
+            "CortexRelay is a cross-provider agent control plane. "
+            "Keep planning, arbitration, routing decisions, and final synthesis in the calling host. "
+            "Prefer persistent provider-native agent sessions when available and treat closed-end execution as an explicit fallback for one-shot or unsupported cases. "
+            "Every delegated agent and provider-native child must remain observable through CortexRelay with durable session identity, semantic events, messages, state, and complete final output. "
+            "Use incremental cursors for live activity instead of repeatedly re-reading full state. "
+            "Provider-native subagents are allowed, but they remain subject to CortexRelay depth, budget, access, scheduling, workspace, and quality policies. "
+            "Do not conclude while worker results required for the answer are still pending; consume the required agent outputs before final synthesis. "
+            "Preserve immutable dependency/workspace lineage for staged writes, inspect changes before applying them, and never apply or discard worker work without explicit user intent. "
+            "Structured summaries and progress are supplementary: the complete worker final result is authoritative."
         ),
     )
 

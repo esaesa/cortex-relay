@@ -81,10 +81,13 @@ class MCPTransportMappingTests(unittest.TestCase):
             if "MCP support is not installed" in str(exc):
                 self.skipTest("MCP optional dependency is not installed")
             raise
-        self.assertIn("synchronous delegate", server.instructions)
-        self.assertIn("Never end a turn with uncompleted async tasks", server.instructions)
-        self.assertIn("final_text", server.instructions)
-        self.assertIn("agent_session_id", server.instructions)
+        self.assertIn("cross-provider agent control plane", server.instructions)
+        self.assertIn("persistent provider-native agent sessions", server.instructions)
+        self.assertIn("closed-end execution", server.instructions)
+        self.assertIn("provider-native child", server.instructions)
+        self.assertIn("complete worker final result is authoritative", server.instructions)
+        self.assertNotIn("Use synchronous delegate", server.instructions)
+        self.assertNotIn("poll task_wait", server.instructions)
         wait_tool = next(
             t for t in server._tool_manager.list_tools() if t.name == "task_wait"
         )
