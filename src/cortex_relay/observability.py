@@ -1170,7 +1170,7 @@ def render_dashboard(
 
     summary = snapshot.get("summary") or {}
     totals = [
-        f"active {summary.get('active', 0)}",
+        f"Tasks: active {summary.get('active', 0)}",
         f"success {summary.get('success', 0)}",
         f"failed {summary.get('failed', 0)}",
     ]
@@ -1181,17 +1181,39 @@ def render_dashboard(
     if isinstance(cost, (int, float)):
         totals.append("cost $" + f"{float(cost):.4f}")
     lines.append(" | ".join(totals))
+
+    agents = snapshot.get("agents") or []
+    agent_summary = snapshot.get("agent_summary") or {}
+    agent_totals = [
+        f"Agents: running {agent_summary.get('running', 0)}",
+        f"idle {agent_summary.get('idle', 0)}",
+        f"failed {agent_summary.get('failed', 0)}",
+    ]
+    closed = int(agent_summary.get("closed") or 0)
+    if closed:
+        agent_totals.append(f"closed {closed}")
+    lines.append(" | ".join(agent_totals))
     lines.append("")
 
     tasks = snapshot.get("tasks") or []
-    if not tasks:
+    if not tasks and not agents:
         if completed_only:
             lines.append("No completed tasks.")
         elif snapshot.get("active_only"):
             lines.append("No active CortexRelay requests. Watching for new requests.")
         else:
-            lines.append("No CortexRelay tasks recorded yet.")
+            lines.append("No CortexRelay tasks or agents recorded yet.")
         return "\n".join(lines)
+
+    if not tasks:
+        if completed_only:
+            lines.append("No completed tasks.")
+        elif snapshot.get("active_only"):
+            lines.append("No active workflow tasks.")
+        else:
+            lines.append("No workflow tasks recorded.")
+        if agents:
+            lines.append("")
 
     now = time.time()
     for item in tasks:
@@ -1340,6 +1362,104 @@ def render_dashboard(
         elif status == "success" and item.get("summary"):
             lines.append(f"  result: {_truncate(str(item.get('summary')), 120)}")
         lines.append("")
+
+    if agents:
+        lines.append("Agents")
+        lines.append("------")
+        for agent in agents:
+            state = str(agent.get("state") or "unknown")
+            symbol = {
+                "starting": "◌",
+                "running": "●",
+                "idle": "✓",
+                "failed": "!",
+                "interrupted": "!",
+                "closed": "○",
+            }.get(state, "?")
+            child_prefix = "↳ " if agent.get("parent_session_id") else ""
+            route = (
+                f"{child_prefix}{agent.get('role') or 'worker'} → "
+                f"{_compact_model(agent.get('provider'), agent.get('model'), agent.get('reasoning'))}"
+            )
+            lines.append(f"{symbol} {route}")
+            elapsed = _elapsed(
+                {"started_at": agent.get("created_at") or agent.get("updated_at")},
+                now,
+            )
+            objective = str(agent.get("objective") or "").strip()
+            state_prefix = f"  {state.upper():<11} {elapsed}  "
+            if objective:
+                terminal_width = shutil.get_terminal_size((100, 24)).columns
+                lines.extend(
+                    textwrap.wrap(
+                        objective,
+                        width=max(terminal_width, len(state_prefix) + 24),
+                        initial_indent=state_prefix,
+                        subsequent_indent=" " * len(state_prefix),
+                        break_long_words=True,
+                        break_on_hyphens=False,
+                    )
+                )
+            else:
+                lines.append(state_prefix.rstrip())
+
+            details: list[str] = [
+                f"session {str(agent.get('session_id') or '')[:18]}",
+                f"access {agent.get('access') or 'read_only'}",
+            ]
+            if agent.get("provider_session_id"):
+                details.append(
+                    "provider-session "
+                    + _truncate(str(agent["provider_session_id"]), 36)
+                )
+            if agent.get("task_id"):
+                details.append(f"task {agent['task_id']}")
+            if agent.get("parent_session_id"):
+                details.append(
+                    "parent " + str(agent["parent_session_id"])[:18]
+                )
+            lines.append("  " + " | ".join(details))
+
+            activity = agent.get("current_activity")
+            if activity:
+                lines.append(f"  Current: {_truncate(str(activity), 120)}")
+            elif state in {"starting", "running"}:
+                lines.append("  Current: waiting for provider activity")
+
+            last_event = agent.get("last_event")
+            if isinstance(last_event, dict):
+                sequence = int(last_event.get("sequence") or 0)
+                at = last_event.get("at")
+                if isinstance(at, str):
+                    lines.append(
+                        f"  Agent events: {sequence} | last "
+                        f"{_elapsed({'started_at': at}, now)} ago"
+                    )
+                else:
+                    lines.append(f"  Agent events: {sequence}")
+
+            if verbosity:
+                recent = agent.get("recent_events")
+                if isinstance(recent, list) and recent:
+                    lines.append("  Recent agent activity:")
+                    for event in recent[-(15 if verbosity >= 2 else 5):]:
+                        if not isinstance(event, dict):
+                            continue
+                        at = str(event.get("at") or "")
+                        try:
+                            clock = datetime.fromisoformat(at).astimezone().strftime("%H:%M:%S")
+                        except ValueError:
+                            clock = "--:--:--"
+                        summary_text = _agent_event_summary(event) or str(event.get("kind") or "activity")
+                        lines.append(
+                            f"    {clock}  {_truncate(summary_text, 150)}"
+                        )
+            lines.append("")
+    elif not completed_only:
+        if snapshot.get("active_only"):
+            lines.append("No active direct agents.")
+        else:
+            lines.append("No direct agents recorded.")
 
     return "\n".join(lines).rstrip()
 
