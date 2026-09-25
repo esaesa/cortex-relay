@@ -25,7 +25,7 @@ class AgentService:
         self._futures: dict[str, Future[Any]] = {}
         self._lock = threading.Lock()
 
-    def shutdown(self, *, wait: bool = true) -> None:
+    def shutdown(self, *, wait: bool = True) -> None:
         """Release direct-agent worker threads owned by this service."""
         self.executor.shutdown(wait=wait, cancel_futures=True)
 
