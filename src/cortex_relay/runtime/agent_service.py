@@ -14,6 +14,7 @@ from cortex_relay.core.models import TaskBudget, TaskSpec
 from cortex_relay.core.registry import ProviderRegistry
 from cortex_relay.runtime.agent_events import normalize_agent_events
 from cortex_relay.runtime.progress import normalize_progress
+from cortex_relay.runtime.supervision import SupervisionTracker
 
 
 class AgentService:
@@ -725,12 +726,7 @@ class AgentService:
                 max_runtime_seconds=budget_values.get("max_runtime_seconds"),
                 max_child_agents=budget_values.get("max_child_agents"),
             )
-            supervision: dict[str, Any] = {
-                "tool_calls": 0,
-                "last_tool_fingerprint": None,
-                "repeated_calls": 0,
-                "child_ids": set(),
-            }
+            supervision = SupervisionTracker(budget)
 
             def trip_budget(reason: str, activity: str) -> None:
                 cancel_event.set()
@@ -765,58 +761,9 @@ class AgentService:
                 if semantic is None:
                     return
                 self._renew_lease_on_progress(session_id)
-
-                if semantic.phase == "tool" and semantic.state == "active":
-                    supervision["tool_calls"] = int(supervision["tool_calls"]) + 1
-                    fingerprint = (
-                        str(semantic.tool or ""),
-                        str(semantic.command or ""),
-                        str(semantic.path or ""),
-                    )
-                    if fingerprint == supervision["last_tool_fingerprint"]:
-                        supervision["repeated_calls"] = int(supervision["repeated_calls"]) + 1
-                    else:
-                        supervision["last_tool_fingerprint"] = fingerprint
-                        supervision["repeated_calls"] = 1
-                    if (
-                        budget.max_tool_calls is not None
-                        and int(supervision["tool_calls"]) > budget.max_tool_calls
-                    ):
-                        trip_budget(
-                            f"tool-call budget exceeded: {supervision['tool_calls']} > {budget.max_tool_calls}",
-                            "Tool-call budget exceeded; cancellation requested",
-                        )
-                    if (
-                        budget.max_repeated_calls is not None
-                        and int(supervision["repeated_calls"]) > budget.max_repeated_calls
-                    ):
-                        trip_budget(
-                            "repeated tool-call budget exceeded: "
-                            f"{supervision['repeated_calls']} > {budget.max_repeated_calls}; "
-                            f"fingerprint={fingerprint!r}",
-                            "Repeated tool-call stall detected; cancellation requested",
-                        )
-
-                child_ids = supervision["child_ids"]
-                if isinstance(child_ids, set):
-                    for child in semantic.subagents:
-                        if not isinstance(child, dict):
-                            continue
-                        child_id = (
-                            child.get("provider_session_id")
-                            or child.get("session_id")
-                            or child.get("id")
-                        )
-                        if child_id:
-                            child_ids.add(str(child_id))
-                    if (
-                        budget.max_child_agents is not None
-                        and len(child_ids) > budget.max_child_agents
-                    ):
-                        trip_budget(
-                            f"child-agent budget exceeded: {len(child_ids)} > {budget.max_child_agents}",
-                            "Child-agent budget exceeded; cancellation requested",
-                        )
+                violation = supervision.observe(semantic)
+                if violation is not None:
+                    trip_budget(violation.reason, violation.activity)
 
             effective_timeout = (
                 min(timeout_seconds, budget.max_runtime_seconds)
