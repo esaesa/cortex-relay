@@ -280,6 +280,25 @@ class AgentStore:
                         rows.append(item)
         return rows[-limit:]
 
+
+    def save_result(self, session_id: str, result: dict[str, Any]) -> None:
+        """Persist the latest completed turn result for a session."""
+        self.get(session_id)
+        path = self._result_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp = path.with_suffix(path.suffix + f".{uuid4().hex}.tmp")
+        temp.write_text(
+            json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        temp.replace(path)
+
+    def result(self, session_id: str) -> dict[str, Any] | None:
+        """Return the latest durable completed-turn result, if any."""
+        self.get(session_id)
+        data = self._read_json(self._result_path(session_id))
+        return data if isinstance(data, dict) else None
+
     def close(self, session_id: str) -> AgentSession:
         return self.update(session_id, state="closed")
 
@@ -322,6 +341,9 @@ class AgentStore:
 
     def _messages_path(self, session_id: str) -> Path:
         return self.root / "agent-messages" / f"{session_id}.jsonl"
+
+    def _result_path(self, session_id: str) -> Path:
+        return self.root / "agent-results" / f"{session_id}.json"
 
     def _sequence_path(self, session_id: str) -> Path:
         return self.root / "agent-events" / f"{session_id}.seq"
