@@ -656,7 +656,7 @@ class ProviderRegistry:
                 pass
             raise
 
-        return replace(
+        finalized = replace(
             result,
             metadata={
                 **result.metadata,
@@ -665,6 +665,14 @@ class ProviderRegistry:
                 "workflow_task": False,
             },
         )
+        try:
+            self.agent_store.save_result(
+                agent_session_id,
+                finalized.to_dict(),
+            )
+        except (OSError, ValueError):
+            pass
+        return finalized
 
     def _execute_provider(self, task: TaskSpec) -> TaskResult:
         cancel_event = task.metadata.get("_cancel_event")
