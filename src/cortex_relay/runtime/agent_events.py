@@ -28,7 +28,7 @@ def normalize_agent_events(
             AgentEvent(
                 session_id=session_id,
                 kind="diagnostic",
-                data={"stream": "stderr", "text": text[:4000]},
+                data={"stream": "stderr", "text": _sanitize(text[:4000])},
                 provider_event="stderr",
             ),
         )
