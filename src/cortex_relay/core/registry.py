@@ -4,6 +4,7 @@ import subprocess
 
 from dataclasses import replace
 from typing import Any
+from pathlib import Path
 from datetime import datetime, timezone
 
 from cortex_relay.core.models import TaskResult, TaskSpec
