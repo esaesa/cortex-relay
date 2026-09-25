@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from cortex_relay.core.models import Evidence, TaskResult, TaskSpec
-from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner
+from cortex_relay.runtime.process import (
+    ProcessCancelledError,
+    ProcessIdleTimeoutError,
+    ProcessRunner,
+)
 from cortex_relay.runtime.progress import runner_progress_kwargs
 
 from .base import ProviderAdapter, ProviderCapabilities
@@ -144,6 +148,11 @@ class CodexAdapter(ProviderAdapter):
             timeout_seconds=task.timeout_seconds + 15,
             on_event=on_event,
             cancel_event=cancel_event if hasattr(cancel_event, "is_set") else None,
+            idle_timeout_seconds=(
+                float(task.budget.max_idle_seconds)
+                if task.budget.max_idle_seconds is not None
+                else None
+            ),
         )
         try:
             turn = client.run_turn(
@@ -161,6 +170,19 @@ class CodexAdapter(ProviderAdapter):
                 model=task.model,
                 summary="Codex session turn was cancelled.",
                 error="provider session cancelled",
+                termination_reason="cancelled",
+                conversation_id=provider_session_id,
+                duration_seconds=time.monotonic() - started,
+                metadata={"transport": "app-server"},
+            )
+        except ProcessIdleTimeoutError as exc:
+            return TaskResult(
+                status="timeout",
+                provider=self.name,
+                model=task.model,
+                summary="Codex session turn stalled without provider progress.",
+                error=f"idle timeout after {exc.idle_timeout_seconds:g} seconds",
+                termination_reason="idle_timeout",
                 conversation_id=provider_session_id,
                 duration_seconds=time.monotonic() - started,
                 metadata={"transport": "app-server"},
@@ -172,6 +194,7 @@ class CodexAdapter(ProviderAdapter):
                 model=task.model,
                 summary="Codex session turn timed out.",
                 error=f"timeout after {task.timeout_seconds} seconds",
+                termination_reason="execution_timeout",
                 conversation_id=provider_session_id,
                 duration_seconds=time.monotonic() - started,
                 metadata={"transport": "app-server"},
