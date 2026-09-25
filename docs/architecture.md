@@ -111,7 +111,19 @@ CortexRelay now has two deliberately separate layers:
 
 The primary coding agent remains responsible for decomposition, sequencing, arbitration, and final synthesis. CortexRelay does not add a second LLM planning loop.
 
-The runtime is built around a provider-neutral `TaskSpec -> TaskResult` contract. `TaskResult.final_text` is the complete semantic answer produced for the parent; `summary`, evidence, tests, changed files, commands, and risks are machine-readable indexes over that answer rather than replacements for it. Provider-specific CLI flags, response envelopes, authentication behavior, and error translation stay inside provider adapters. The current runtime adapters target OpenCode, Antigravity CLI, and OpenAI Codex CLI.
+The runtime is built around three provider-neutral primitives:
+
+```text
+TaskSpec        orchestration intent, policy and acceptance
+    ↓
+AgentSession    live/resumable provider conversation and child topology
+    ↓
+TaskResult      completed-turn envelope and full final answer
+```
+
+`AgentSession` is the execution primitive. It carries a Cortex session ID, provider-native session/thread/conversation ID, parent/root links, provider/model/reasoning/access metadata and durable state. `AgentEvent` stores semantic live activity such as text deltas, tool work, lifecycle transitions and child updates. `AgentMessage` stores host↔agent and agent↔agent handoffs. `TaskResult.final_text` remains the complete semantic answer produced for the parent; `summary`, evidence, tests, changed files, commands, and risks are machine-readable indexes over that answer rather than replacements for it.
+
+Provider-specific transports remain inside adapters. Codex uses app-server threads as its preferred session path, OpenCode uses its persistent session/server model, and Antigravity uses resumable conversation IDs plus `stream-json`. A provider may still expose `session_mode="closed_end"` for one-shot execution when no richer control channel exists.
 
 ### Execution profiles
 
@@ -161,17 +173,19 @@ The task-control interface is defined as a protocol so the current custom MCP to
 
 Read-only tasks are instructed not to modify files, and all current runtime adapters compare git status before and after execution. Write-capable tasks can be isolated into linked git worktrees by the provider registry, so parallel writers do not share the same checkout.
 
-### Observability boundary
+### Agent/session and observability boundary
 
-Observability is implemented above provider adapters in the registry so every transport and provider shares one lifecycle model. Providers remain responsible only for their native execution/usage envelopes; the registry adds route/worktree/fallback context and persists the normalized task/session record.
+The registry creates a Cortex `AgentSession` before launching provider work, then mirrors provider-native events into a durable semantic event log. Native provider child IDs are upserted as child `AgentSession` records instead of being flattened into progress text. Cortex-managed child tasks also inherit the parent agent-session link, so both kinds of delegation appear in the same tree.
 
-State is external to the Git checkout and keyed by the resolved workspace path. Terminal results are persisted as JSON and complete child final answers are additionally persisted as dedicated UTF-8 output files so large answers can be retrieved in bounded chunks without semantic truncation. This avoids dirtying repositories and allows a separate terminal/process to monitor an active MCP worker tree. Writes are atomic and best-effort: observability is diagnostically useful but never execution-critical.
+Dashboard-oriented `ProgressEvent` records are derived from this richer stream and may remain bounded. The authoritative session stream is separate: response deltas, lifecycle events, provider-session bindings, tool activity and child updates are preserved through `agent_events`. Sensitive keys/tokens in rich event payloads are redacted before persistence.
+
+State is external to the Git checkout and keyed by the resolved workspace path. Terminal results are persisted as JSON and complete child final answers are additionally persisted as dedicated UTF-8 output files so large answers can be retrieved in bounded chunks without semantic truncation. Agent sessions, semantic events and message histories are persisted alongside task state so a new MCP process can inspect completed or resumable sessions without relying on process-local futures.
 
 Interactive host launches propagate only non-secret session identity fields (session ID, host profile/model/reasoning and workspace) to the injected MCP process. Provider credentials are not copied into observability records.
 
 ### Protocol frontends
 
-MCP and A2A are peer frontends over the same runtime. MCP exposes provider/profile discovery, runtime status/history, and single/parallel delegation. A2A exposes a server-side fixed delegation policy through an Agent Card, JSON-RPC, and HTTP+JSON so remote agents such as Gemini CLI can send bounded text tasks without controlling local filesystem or permission policy.
+MCP and A2A are peer frontends over the same runtime. MCP exposes provider/profile discovery, runtime status/history, single/parallel delegation, and first-class agent controls for listing sessions, reading semantic events/messages, traversing children, sending follow-ups, and closing Cortex session handles. A2A exposes a server-side fixed delegation policy through an Agent Card, JSON-RPC, and HTTP+JSON so remote agents such as Gemini CLI can send bounded text tasks without controlling local filesystem or permission policy.
 
 ## Configuration ownership
 
