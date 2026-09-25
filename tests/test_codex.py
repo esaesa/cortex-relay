@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from cortex_relay.core.models import TaskSpec
 from cortex_relay.providers.codex import CodexAdapter
+from cortex_relay.providers.codex_app_server import CodexTurnResult
 from cortex_relay.providers.codex_models import compatibility_error, known_model_ids
 from cortex_relay.runtime.process import ProcessResult
 
@@ -109,6 +110,47 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertIn("--model", command)
         self.assertIn("gpt-6-sol", command)
         self.assertIn('model_reasoning_effort="high"', command)
+
+    @patch("cortex_relay.providers.codex.shutil.which", return_value="/usr/bin/codex")
+    @patch("cortex_relay.providers.codex.CodexAppServerClient")
+    def test_session_execution_uses_app_server_and_can_resume(self, client_cls, _which):
+        payload = {
+            "summary": "Reviewed.",
+            "final_text": "Complete session result.",
+            "evidence": [],
+            "changed_files": [],
+            "commands": [],
+            "tests": [],
+            "risks": [],
+        }
+        client_cls.return_value.run_turn.return_value = CodexTurnResult(
+            thread_id="thread-native",
+            turn_id="turn-1",
+            final_text=json.dumps(payload),
+            usage={"input_tokens": 5, "output_tokens": 2},
+            events=(),
+            stderr="",
+        )
+        adapter = CodexAdapter()
+        with tempfile.TemporaryDirectory() as tmp:
+            task = TaskSpec(
+                objective="Review",
+                provider="codex",
+                model="gpt-6-sol",
+                reasoning="high",
+                workspace=Path(tmp),
+                access="workspace_write",
+            )
+            first = adapter.execute_session(task)
+            second = adapter.continue_session(task, "thread-native")
+
+        self.assertTrue(first.ok)
+        self.assertEqual(first.metadata["transport"], "app-server")
+        self.assertEqual(first.conversation_id, "thread-native")
+        calls = client_cls.return_value.run_turn.call_args_list
+        self.assertIsNone(calls[0].kwargs["thread_id"])
+        self.assertEqual(calls[1].kwargs["thread_id"], "thread-native")
+        self.assertEqual(second.final_text, "Complete session result.")
 
     @patch("cortex_relay.providers.codex.shutil.which", return_value="/usr/bin/codex")
     def test_read_only_uses_read_only_sandbox(self, _which):
