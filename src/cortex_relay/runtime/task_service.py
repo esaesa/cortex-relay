@@ -603,6 +603,7 @@ class TaskService:
             provider=result.provider,
             model=result.model,
             summary="Provider work completed, but CortexRelay quality gates rejected it.",
+            final_text=result.final_text,
             evidence=result.evidence,
             changed_files=result.changed_files,
             commands=result.commands,
@@ -761,6 +762,21 @@ class TaskService:
 
     def artifact(self, task_id: str, *, create: bool = True) -> dict[str, Any]:
         return self.artifacts.for_task(task_id, create=create)
+
+    def output(
+        self,
+        task_id: str,
+        *,
+        offset: int = 0,
+        max_chars: int = 65536,
+    ) -> dict[str, Any]:
+        workspace, _ = self._resolve(task_id)
+        return self.store.get_output(
+            workspace,
+            task_id,
+            offset=offset,
+            max_chars=max_chars,
+        )
 
     def worktree(self, task_id: str, attempt: int | None = None) -> dict[str, Any]:
         return self.handoff.worktree(task_id, attempt)
