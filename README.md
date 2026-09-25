@@ -299,7 +299,7 @@ Primary coding agent
 
 The calling agent remains the orchestrator. CortexRelay owns deterministic routing, session control, event persistence, child topology, workspace isolation, and normalized results rather than adding another planning model.
 
-The MCP surface now includes direct agent controls: `agent_start`, `agents`, `agent_get`, `agent_events`, `agent_messages`, `agent_children`, `agent_send`, and `agent_close`. Use `agent_start` for a direct persistent specialist that may need follow-up turns or resume; use `delegate_async` when you need DAG scheduling, worktree isolation, budgets, quality gates, or artifact lineage. Completed task results expose `agent_session_id`, while `task_output` remains the lossless chunked final-answer channel.
+The MCP surface now includes direct agent controls: `agent_start`, `agent_start_async`, `agent_wait`, `agent_result`, `agents`, `agent_get`, `agent_events`, `agent_messages`, `agent_children`, `agent_send`, and `agent_close`. Use `agent_start_async` for independent parallel persistent specialists, `agent_start` when the first turn is immediately required, and `delegate_async` only when you need DAG scheduling, worktree isolation, budgets, quality gates, or artifact lineage. Direct-agent `access=auto` inherits the selected profile's access. Completed task results expose `agent_session_id`, while `task_output` remains the lossless chunked final-answer channel.
 
 Inspect runtime providers:
 
