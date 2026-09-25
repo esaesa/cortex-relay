@@ -171,6 +171,11 @@ class ProviderRegistry:
         preferred = self.policy.select(task, available)
         if task.provider != "auto":
             return [task.provider]
+        # An explicit model ID is provider-specific in practice. Preserve the
+        # deterministic policy-selected provider rather than trying that same
+        # model ID against unrelated providers during health-aware routing.
+        if task.model is not None:
+            return [preferred]
         if not available:
             return [preferred]
         return sorted(
@@ -264,7 +269,8 @@ class ProviderRegistry:
         """Start one direct provider-backed agent session without creating a workflow task.
 
         This is the session-first path. It deliberately skips DAG scheduling,
-        worktree isolation, task budgets, and task lifecycle records. Callers that
+        worktree isolation, token/cost workflow budgets, quality gates, and task
+        lifecycle records. Direct semantic supervision budgets still apply. Callers that
         need those workflow guarantees should use the task/delegation API instead.
         """
         task = replace(task, isolate_write=False)
