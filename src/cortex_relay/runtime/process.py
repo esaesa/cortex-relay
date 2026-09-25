@@ -152,6 +152,13 @@ class ProcessRunner:
                 for line in pipe:
                     events.put((name, line))
             finally:
+                # Popen does not close PIPE wrappers merely because the child
+                # exited. Close each stream in its owning reader thread so
+                # cancelled/short-lived provider turns do not leak OS handles.
+                try:
+                    pipe.close()
+                except (OSError, ValueError):
+                    pass
                 events.put((name, None))
 
         readers = [
