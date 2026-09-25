@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from cortex_relay import __version__
-from cortex_relay.core.models import TaskAccess, TaskResult, TaskSpec
+from cortex_relay.core.models import TaskAccess, TaskBudget, TaskResult, TaskSpec
 from cortex_relay.core.registry import ProviderRegistry, default_registry
 from cortex_relay.runtime.progress import ProgressEvent
 
@@ -81,6 +81,7 @@ class A2AServerPolicy:
     access: TaskAccess = "read_only"
     timeout_seconds: int = 300
     isolate_write: bool = True
+    budget: TaskBudget = field(default_factory=TaskBudget)
 
     def __post_init__(self) -> None:
         if not self.provider.strip():
@@ -139,6 +140,7 @@ class A2AServerPolicy:
             model=self.model,
             timeout_seconds=self.timeout_seconds,
             isolate_write=self.isolate_write,
+            budget=self.budget,
             metadata=metadata,
         )
 
