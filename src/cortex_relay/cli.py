@@ -447,11 +447,22 @@ def _gc(args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
         mode = "Would prune" if args.dry_run else "Pruned"
-        print(f"{mode} {result['count']} terminal task record(s).")
+        print(
+            f"{mode} {result['count']} terminal task record(s) and "
+            f"{result.get('agent_count', 0)} terminal agent tree(s)."
+        )
         for item in result["tasks"][:25]:
-            print(f"  {item['task_id']}")
+            print(f"  task  {item['task_id']}")
         if len(result["tasks"]) > 25:
-            print(f"  ... and {len(result['tasks']) - 25} more")
+            print(f"  ... and {len(result['tasks']) - 25} more task(s)")
+        agents = result.get("agents") or []
+        for item in agents[:25]:
+            print(
+                f"  agent {item['root_session_id']} "
+                f"({len(item.get('sessions') or [])} session(s))"
+            )
+        if len(agents) > 25:
+            print(f"  ... and {len(agents) - 25} more agent tree(s)")
     return 0
 
 
