@@ -373,7 +373,11 @@ class ProviderRegistry:
             metadata["_cancel_event"] = cancel_event
         supervision = SupervisionTracker(task.budget)
 
-        def trip_budget(reason: str, activity: str) -> None:
+        def trip_budget(
+            reason: str,
+            activity: str,
+            termination_reason: str = "supervisor_budget",
+        ) -> None:
             if hasattr(cancel_event, "set"):
                 cancel_event.set()
             self.run_store.update_task(
@@ -381,7 +385,7 @@ class ProviderRegistry:
                 task_id,
                 budget_exceeded=True,
                 budget_reason=reason,
-                termination_reason="supervisor_budget",
+                termination_reason=termination_reason,
                 current_activity=activity,
             )
 
@@ -407,7 +411,11 @@ class ProviderRegistry:
             self.run_store.record_progress(source_workspace, event)
             violation = supervision.observe(event)
             if violation is not None:
-                trip_budget(violation.reason, violation.activity)
+                trip_budget(
+                    violation.reason,
+                    violation.activity,
+                    violation.termination_reason,
+                )
 
             if callable(external_progress):
                 try:
@@ -454,21 +462,27 @@ class ProviderRegistry:
 
         usage_summary = summarize_usage(result.usage)
         budget_error: str | None = None
+        budget_termination_reason: str | None = None
         if task.budget.max_tokens is not None:
             total = usage_summary.get("total_tokens")
             if isinstance(total, int) and total > task.budget.max_tokens:
                 budget_error = (
                     f"token budget exceeded: {total} > {task.budget.max_tokens}"
                 )
+                budget_termination_reason = "token_budget"
         if task.budget.max_cost is not None:
             cost = usage_summary.get("cost")
             if isinstance(cost, (int, float)) and float(cost) > task.budget.max_cost:
                 budget_error = (
                     f"cost budget exceeded: {float(cost):.6f} > {task.budget.max_cost:.6f}"
                 )
+                budget_termination_reason = "cost_budget"
         stored = self.run_store.get_task(source_workspace, task_id) or {}
         if stored.get("budget_exceeded") and not budget_error:
             budget_error = str(stored.get("budget_reason") or "task budget exceeded")
+            stored_reason = stored.get("termination_reason")
+            if isinstance(stored_reason, str) and stored_reason:
+                budget_termination_reason = stored_reason
         if budget_error and result.status != "timeout":
             result = TaskResult(
                 status="budget_exceeded",
@@ -483,7 +497,7 @@ class ProviderRegistry:
                 risks=result.risks,
                 conversation_id=result.conversation_id,
                 error=budget_error,
-                termination_reason="supervisor_budget",
+                termination_reason=budget_termination_reason or "supervisor_budget",
                 duration_seconds=result.duration_seconds,
                 usage=result.usage,
                 metadata=result.metadata,
@@ -877,7 +891,11 @@ class ProviderRegistry:
 
         supervision = SupervisionTracker(task.budget)
 
-        def trip_direct_budget(reason: str, activity: str) -> None:
+        def trip_direct_budget(
+            reason: str,
+            activity: str,
+            termination_reason: str,
+        ) -> None:
             cancel_event = task.metadata.get("_cancel_event")
             if cancel_event is not None and hasattr(cancel_event, "set"):
                 cancel_event.set()
@@ -887,7 +905,7 @@ class ProviderRegistry:
                     {
                         "budget_exceeded": True,
                         "budget_reason": reason,
-                        "termination_reason": "supervisor_budget",
+                        "termination_reason": termination_reason,
                         "current_activity": activity,
                     },
                 )
@@ -931,7 +949,11 @@ class ProviderRegistry:
                 return
             violation = supervision.observe(semantic)
             if violation is not None:
-                trip_direct_budget(violation.reason, violation.activity)
+                trip_direct_budget(
+                    violation.reason,
+                    violation.activity,
+                    violation.termination_reason,
+                )
 
         def progress_heartbeat(pid: int, alive: bool) -> None:
             try:
@@ -973,7 +995,10 @@ class ProviderRegistry:
                         session_metadata.get("budget_reason")
                         or "direct-agent supervision budget exceeded"
                     ),
-                    termination_reason="supervisor_budget",
+                    termination_reason=str(
+                        session_metadata.get("termination_reason")
+                        or "supervisor_budget"
+                    ),
                 )
             result = self._finish_agent_session(
                 agent_session_id,
