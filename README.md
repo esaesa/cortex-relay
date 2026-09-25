@@ -40,7 +40,7 @@ A bad worker decision normally affects one task. A bad orchestration decision ca
 
 - **Better cost/quality allocation** instead of one model and one thinking level for every task.
 - **Preserved planning quality** because the primary model owns decomposition, arbitration, and final synthesis.
-- **Lower context pressure** because workers return compact evidence instead of forwarding raw repository volume.
+- **Lower context pressure without information loss** because workers return structured summaries/evidence while preserving their complete final answer for the orchestrator.
 - **Parallelism** for independent exploration, review, documentation, and testing work.
 - **Repeatability** through version-controlled configuration.
 - **Provider portability**: Codex and Gemini CLI are adapters over the same orchestration idea.
@@ -327,7 +327,7 @@ python -m pip install -e ".[mcp]"
 cortex-relay serve --transport mcp
 ```
 
-The MCP surface includes `providers`, `profiles`, `status`, `history`, `delegate`, `delegate_parallel`, `delegate_async`, `task_status`, `task_events`, `task_wait`, `task_cancel`, `tasks`, `task_artifact`, `task_worktree`, `task_diff`, `task_apply`, and `task_discard`. OpenCode, Codex, and Antigravity are available through the same tools when their CLIs are installed. Async task IDs and complete results survive MCP restarts. Use `status --watch -v` for recent actions, `-vv` for bounded output previews, `task_events` for cursor-based updates, and `task_wait` for the full result. Dependent tasks can be queued with `depends_on` and viewed by `group_id`. Finished isolated worktrees can be inspected with `task_worktree` and `task_diff`, then explicitly applied or discarded.
+The MCP surface includes `providers`, `profiles`, `status`, `history`, `delegate`, `delegate_parallel`, `delegate_async`, `task_status`, `task_events`, `task_wait`, `task_output`, `task_cancel`, `tasks`, `task_artifact`, `task_worktree`, `task_diff`, `task_apply`, and `task_discard`. OpenCode, Codex, and Antigravity are available through the same tools when their CLIs are installed. Every successful result carries both a compact `summary` and the worker's complete `final_text`. Async task IDs, normalized results, and complete child final answers survive MCP restarts. Use `status --watch -v` for recent actions, `-vv` for bounded output previews, `task_events` for cursor-based updates, `task_wait` for the complete result object, and `task_output` to page through large final answers without truncation. Dependent tasks can be queued with `depends_on` and viewed by `group_id`. Finished isolated worktrees can be inspected with `task_worktree` and `task_diff`, then explicitly applied or discarded.
 
 See [Runtime delegation](docs/runtime.md) and [Architecture](docs/architecture.md) for the shared MCP/A2A runtime design.
 
