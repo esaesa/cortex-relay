@@ -270,18 +270,19 @@ class AgentServiceTests(unittest.TestCase):
                 profiles=FallbackProfileResolver(),
             )
             service = AgentService(registry)
-            self.addCleanup(service.shutdown)
+            try:
+                result = service.start(
+                    objective="inspect",
+                    role="reviewer",
+                    workspace=workspace,
+                )
 
-            result = service.start(
-                objective="inspect",
-                role="reviewer",
-                workspace=workspace,
-            )
-
-            self.assertEqual(result["status"], "error")
-            self.assertEqual(result["provider"], "fake")
-            self.assertIn("agent_session_id", result)
-            self.assertFalse(alternate.executed)
+                self.assertEqual(result["status"], "error")
+                self.assertEqual(result["provider"], "fake")
+                self.assertIn("agent_session_id", result)
+                self.assertFalse(alternate.executed)
+            finally:
+                service.shutdown()
 
     def test_direct_agent_persists_supervision_budget_and_progress_renews_lease(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -298,22 +299,23 @@ class AgentServiceTests(unittest.TestCase):
                 lease_ttl_seconds=2,
                 lease_heartbeat_seconds=0.2,
             )
-            self.addCleanup(service.shutdown)
-
-            result = service.start(
-                objective="inspect one file",
-                provider="opencode",
-                workspace=workspace,
-                max_repeated_calls=2,
-                max_idle_seconds=11,
-                max_child_agents=1,
-            )
-            session = result["session"]
-            self.assertEqual(session["metadata"]["budget"]["max_repeated_calls"], 2)
-            self.assertEqual(session["metadata"]["budget"]["max_idle_seconds"], 11)
-            self.assertEqual(session["metadata"]["budget"]["max_child_agents"], 1)
-            self.assertIn("last_progress_at", session["metadata"])
-            self.assertTrue(session["metadata"]["lease_renewed_by_progress"])
+            try:
+                result = service.start(
+                    objective="inspect one file",
+                    provider="opencode",
+                    workspace=workspace,
+                    max_repeated_calls=2,
+                    max_idle_seconds=11,
+                    max_child_agents=1,
+                )
+                session = result["session"]
+                self.assertEqual(session["metadata"]["budget"]["max_repeated_calls"], 2)
+                self.assertEqual(session["metadata"]["budget"]["max_idle_seconds"], 11)
+                self.assertEqual(session["metadata"]["budget"]["max_child_agents"], 1)
+                self.assertIn("last_progress_at", session["metadata"])
+                self.assertTrue(session["metadata"]["lease_renewed_by_progress"])
+            finally:
+                service.shutdown()
 
     def test_watch_returns_visible_updates_and_authoritative_running_state(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -527,24 +529,25 @@ class AgentServiceTests(unittest.TestCase):
                 run_store=RunStore(root / "state"),
             )
             service = AgentService(registry)
-            self.addCleanup(service.shutdown)
+            try:
+                started = service.start_async(
+                    objective="hold open",
+                    provider="fake",
+                    workspace=workspace,
+                    timeout_seconds=30,
+                )
+                session_id = started["agent_session_id"]
+                with self.assertRaisesRegex(ValueError, "active turn"):
+                    service.close(session_id)
 
-            started = service.start_async(
-                objective="hold open",
-                provider="fake",
-                workspace=workspace,
-                timeout_seconds=30,
-            )
-            session_id = started["agent_session_id"]
-            with self.assertRaisesRegex(ValueError, "active turn"):
-                service.close(session_id)
-
-            provider.release.set()
-            self.assertTrue(service.wait(session_id, timeout_seconds=5)["complete"])
-            closed = service.close(session_id)
-            self.assertEqual(closed["state"], "closed")
-            with self.assertRaisesRegex(ValueError, "follow-up messages require an idle session"):
-                service.send(session_id, "should fail")
+                provider.release.set()
+                self.assertTrue(service.wait(session_id, timeout_seconds=5)["complete"])
+                closed = service.close(session_id)
+                self.assertEqual(closed["state"], "closed")
+                with self.assertRaisesRegex(ValueError, "follow-up messages require an idle session"):
+                    service.send(session_id, "should fail")
+            finally:
+                service.shutdown()
 
     def test_followup_reuses_provider_session(self):
         with tempfile.TemporaryDirectory() as tmp:
