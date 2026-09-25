@@ -121,6 +121,12 @@ class MCPTransportMappingTests(unittest.TestCase):
             t for t in server._tool_manager.list_tools() if t.name == "agent_result"
         )
         self.assertIn("latest durable completed-turn result", agent_result_tool.description)
+        agent_watch_tool = next(
+            t for t in server._tool_manager.list_tools() if t.name == "agent_watch"
+        )
+        self.assertIn("surface visible progress", agent_watch_tool.description)
+        self.assertIn("updates[]", agent_watch_tool.description)
+        self.assertIn("do not replace it", agent_watch_tool.description)
         agent_events_tool = next(
             t for t in server._tool_manager.list_tools() if t.name == "agent_events"
         )
