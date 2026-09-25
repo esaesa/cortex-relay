@@ -59,3 +59,38 @@ jobs:
 
       - name: Smoke-test A2A imports
         run: python -c "from cortex_relay.transports.a2a import A2AServerPolicy, create_a2a_app; create_a2a_app(policy=A2AServerPolicy())"
+
+  state-concurrency-windows:
+    runs-on: windows-latest
+
+    env:
+      CORTEX_RELAY_ARTIFACT_DIR: ${{ github.workspace }}/.ci-artifacts
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install CortexRelay
+        run: python -m pip install -e .
+
+      - name: Stress durable state without faults
+        run: python tests/stress/state_concurrency.py --profile windows
+
+      - name: Stress durable state under transient faults
+        run: python tests/stress/state_concurrency.py --profile windows --fault-rate 0.02 --fault-point mixed
+
+      - name: Stress durable state under exhausted faults
+        run: python tests/stress/state_concurrency.py --profile fast --iterations 5 --fault-rate 1.0 --fault-point before_publish
+
+      - name: Upload stress reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: state-concurrency-reports
+          path: .ci-artifacts/
+          if-no-files-found: ignore
