@@ -31,10 +31,12 @@ class RuntimeModelTests(unittest.TestCase):
             status="success",
             provider="fake",
             summary="ok",
+            final_text="Complete worker answer with all findings.",
             evidence=(Evidence(finding="issue", path="a.py"),),
         )
         payload = result.to_dict()
         self.assertTrue(result.ok)
+        self.assertEqual(payload["final_text"], "Complete worker answer with all findings.")
         self.assertEqual(payload["evidence"][0]["path"], "a.py")
 
 
