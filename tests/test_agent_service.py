@@ -112,6 +112,59 @@ class FakeProfileResolver:
         )
 
 
+class FailingSessionProvider(SessionProvider):
+    def execute_session(self, task: TaskSpec) -> TaskResult:
+        return TaskResult(
+            status="error",
+            provider=self.name,
+            model=task.model,
+            summary="failed after session start",
+            error="boom",
+            conversation_id="provider-session-failed",
+        )
+
+
+class AlternateSessionProvider(SessionProvider):
+    name = "alt"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.executed = False
+
+    def execute_session(self, task: TaskSpec) -> TaskResult:
+        self.executed = True
+        return TaskResult(
+            status="success",
+            provider=self.name,
+            summary="alternate",
+            final_text="alternate answer",
+            conversation_id="provider-session-alt",
+        )
+
+
+class FallbackProfileResolver:
+    def load(self, _workspace):
+        from cortex_relay.core.profiles import runtime_config_from_mapping
+
+        return runtime_config_from_mapping(
+            {
+                "profiles": {
+                    "primary": {
+                        "provider": "fake",
+                        "access": "read_only",
+                        "fallbacks": ["alternate"],
+                        "fallback_on": ["error", "unavailable"],
+                    },
+                    "alternate": {
+                        "provider": "alt",
+                        "access": "read_only",
+                    },
+                },
+                "roles": {"reviewer": "primary"},
+            }
+        )
+
+
 class ClosedEndProvider(ProviderAdapter):
     name = "closed"
 
@@ -139,6 +192,31 @@ class ClosedEndProvider(ProviderAdapter):
 
 
 class AgentServiceTests(unittest.TestCase):
+    def test_direct_session_never_switches_provider_after_identity_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            failing = FailingSessionProvider()
+            alternate = AlternateSessionProvider()
+            registry = ProviderRegistry(
+                [failing, alternate],
+                run_store=RunStore(root / "state"),
+                profiles=FallbackProfileResolver(),
+            )
+            service = AgentService(registry)
+
+            result = service.start(
+                objective="inspect",
+                role="reviewer",
+                workspace=workspace,
+            )
+
+            self.assertEqual(result["status"], "error")
+            self.assertEqual(result["provider"], "fake")
+            self.assertIn("agent_session_id", result)
+            self.assertFalse(alternate.executed)
+
     def test_start_async_returns_session_before_turn_finishes_and_wait_is_durable(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
