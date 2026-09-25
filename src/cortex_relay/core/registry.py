@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
+import time
 
 from dataclasses import replace
 from typing import Any
@@ -39,6 +41,8 @@ class ProviderRegistry:
         agent_store: AgentStoreBackend | None = None,
     ) -> None:
         self._providers: dict[str, ProviderAdapter] = {}
+        self._health_lock = threading.Lock()
+        self._provider_health: dict[str, dict[str, Any]] = {}
         self.policy = policy or RoutingPolicy()
         self.worktrees = worktrees or WorktreeManager()
         self.profiles = profiles or ProfileResolver()
@@ -66,7 +70,12 @@ class ProviderRegistry:
         return tuple(sorted(self._providers))
 
     def capabilities(self) -> list[dict[str, object]]:
-        return [self._providers[name].capabilities().to_dict() for name in self.names()]
+        rows: list[dict[str, object]] = []
+        for name in self.names():
+            row = self._providers[name].capabilities().to_dict()
+            row["runtime_health"] = self.provider_health(name)
+            rows.append(row)
+        return rows
 
     def provider(self, name: str) -> ProviderAdapter:
         try:
@@ -81,12 +90,133 @@ class ProviderRegistry:
             if provider.capabilities().available
         }
 
+    def provider_health(self, name: str) -> dict[str, Any]:
+        with self._health_lock:
+            raw = dict(self._provider_health.get(name, {}))
+        attempts = int(raw.get("attempts") or 0)
+        successes = int(raw.get("successes") or 0)
+        timeouts = int(raw.get("timeouts") or 0)
+        failures = int(raw.get("failures") or 0)
+        return {
+            "attempts": attempts,
+            "successes": successes,
+            "success_rate": (successes / attempts) if attempts else None,
+            "timeouts": timeouts,
+            "timeout_rate": (timeouts / attempts) if attempts else None,
+            "failures": failures,
+            "failure_rate": (failures / attempts) if attempts else None,
+            "consecutive_failures": int(raw.get("consecutive_failures") or 0),
+            "ema_latency_seconds": raw.get("ema_latency_seconds"),
+            "last_status": raw.get("last_status"),
+        }
+
+    def _record_provider_health(
+        self,
+        name: str,
+        result: TaskResult,
+        duration_seconds: float,
+    ) -> None:
+        with self._health_lock:
+            health = dict(self._provider_health.get(name, {}))
+            attempts = int(health.get("attempts") or 0) + 1
+            successes = int(health.get("successes") or 0)
+            timeouts = int(health.get("timeouts") or 0)
+            failures = int(health.get("failures") or 0)
+            consecutive = int(health.get("consecutive_failures") or 0)
+            if result.status == "success":
+                successes += 1
+                consecutive = 0
+            else:
+                consecutive += 1
+                if result.status == "timeout":
+                    timeouts += 1
+                elif result.status not in {"cancelled", "budget_exceeded"}:
+                    failures += 1
+            previous_latency = health.get("ema_latency_seconds")
+            ema_latency = (
+                duration_seconds
+                if not isinstance(previous_latency, (int, float))
+                else (0.7 * float(previous_latency) + 0.3 * duration_seconds)
+            )
+            self._provider_health[name] = {
+                "attempts": attempts,
+                "successes": successes,
+                "timeouts": timeouts,
+                "failures": failures,
+                "consecutive_failures": consecutive,
+                "ema_latency_seconds": round(ema_latency, 3),
+                "last_status": result.status,
+            }
+
+    def _health_score(self, name: str, *, preferred: str | None = None) -> float:
+        health = self.provider_health(name)
+        attempts = int(health["attempts"])
+        score = 0.35 if name == preferred else 0.0
+        if not attempts:
+            return score
+        success_rate = float(health["success_rate"] or 0.0)
+        timeout_rate = float(health["timeout_rate"] or 0.0)
+        failure_rate = float(health["failure_rate"] or 0.0)
+        latency = float(health["ema_latency_seconds"] or 0.0)
+        score += success_rate
+        score -= 1.25 * timeout_rate
+        score -= 0.75 * failure_rate
+        score -= min(latency / 600.0, 0.5)
+        score -= min(int(health["consecutive_failures"]) * 0.2, 0.8)
+        return score
+
+    def _ordered_provider_names(self, task: TaskSpec) -> list[str]:
+        available = self.available_names()
+        preferred = self.policy.select(task, available)
+        if task.provider != "auto":
+            return [task.provider]
+        if not available:
+            return [preferred]
+        return sorted(
+            available,
+            key=lambda name: (
+                self._health_score(name, preferred=preferred),
+                name == preferred,
+                name,
+            ),
+            reverse=True,
+        )
+
     def resolve(self, task: TaskSpec) -> ProviderAdapter:
-        name = self.policy.select(task, self.available_names())
+        name = self._ordered_provider_names(task)[0]
         try:
             return self._providers[name]
         except KeyError as exc:
             raise KeyError(f"unknown runtime provider: {name}") from exc
+
+    def _run_provider_session(
+        self,
+        provider: ProviderAdapter,
+        task: TaskSpec,
+    ) -> TaskResult:
+        started = time.monotonic()
+        try:
+            result = provider.execute_session(task)
+        except Exception:
+            synthetic = TaskResult(
+                status="error",
+                provider=provider.name,
+                model=task.model,
+                summary="Provider session raised before returning a normalized result.",
+                termination_reason="provider_exception",
+            )
+            self._record_provider_health(
+                provider.name,
+                synthetic,
+                time.monotonic() - started,
+            )
+            raise
+        self._record_provider_health(
+            provider.name,
+            result,
+            time.monotonic() - started,
+        )
+        return result
 
     def profile_config(
         self,
@@ -185,6 +315,11 @@ class ProviderRegistry:
         return last
 
     def execute(self, task: TaskSpec) -> TaskResult:
+        if (
+            task.budget.max_runtime_seconds is not None
+            and task.timeout_seconds > task.budget.max_runtime_seconds
+        ):
+            task = replace(task, timeout_seconds=task.budget.max_runtime_seconds)
         source_workspace = task.workspace
         task_id = task.metadata.get("_task_id") if task.metadata.get("_prestarted") else None
         if not isinstance(task_id, str):
@@ -194,6 +329,29 @@ class ProviderRegistry:
         metadata["_task_id"] = task_id
         metadata["_observability_workspace"] = str(source_workspace)
         external_progress = metadata.get("_external_progress")
+        cancel_event = metadata.get("_cancel_event")
+        if cancel_event is None:
+            cancel_event = threading.Event()
+            metadata["_cancel_event"] = cancel_event
+        supervision: dict[str, Any] = {
+            "tool_calls": 0,
+            "last_tool_fingerprint": None,
+            "repeated_calls": 0,
+            "child_ids": set(),
+        }
+
+        def trip_budget(reason: str, activity: str) -> None:
+            if hasattr(cancel_event, "set"):
+                cancel_event.set()
+            self.run_store.update_task(
+                source_workspace,
+                task_id,
+                budget_exceeded=True,
+                budget_reason=reason,
+                termination_reason="supervisor_budget",
+                current_activity=activity,
+            )
+
         def progress_line(provider: str, line: str, stream: str = "stdout") -> None:
             task_record = self.run_store.get_task(source_workspace, task_id) or {}
             agent_session_id = task_record.get("agent_session_id")
@@ -214,6 +372,61 @@ class ProviderRegistry:
             if event is None:
                 return
             self.run_store.record_progress(source_workspace, event)
+
+            if event.phase == "tool" and event.state == "active":
+                supervision["tool_calls"] = int(supervision["tool_calls"]) + 1
+                fingerprint = (
+                    str(event.tool or ""),
+                    str(event.command or ""),
+                    str(event.path or ""),
+                )
+                if fingerprint == supervision["last_tool_fingerprint"]:
+                    supervision["repeated_calls"] = int(supervision["repeated_calls"]) + 1
+                else:
+                    supervision["last_tool_fingerprint"] = fingerprint
+                    supervision["repeated_calls"] = 1
+
+                max_tool_calls = task.budget.max_tool_calls
+                if (
+                    max_tool_calls is not None
+                    and int(supervision["tool_calls"]) > max_tool_calls
+                ):
+                    trip_budget(
+                        f"tool-call budget exceeded: {supervision['tool_calls']} > {max_tool_calls}",
+                        "Tool-call budget exceeded; cancellation requested",
+                    )
+
+                max_repeated = task.budget.max_repeated_calls
+                if (
+                    max_repeated is not None
+                    and int(supervision["repeated_calls"]) > max_repeated
+                ):
+                    trip_budget(
+                        "repeated tool-call budget exceeded: "
+                        f"{supervision['repeated_calls']} > {max_repeated}; "
+                        f"fingerprint={fingerprint!r}",
+                        "Repeated tool-call stall detected; cancellation requested",
+                    )
+
+            child_ids = supervision["child_ids"]
+            if isinstance(child_ids, set):
+                for child in event.subagents:
+                    if not isinstance(child, dict):
+                        continue
+                    child_id = (
+                        child.get("provider_session_id")
+                        or child.get("session_id")
+                        or child.get("id")
+                    )
+                    if child_id:
+                        child_ids.add(str(child_id))
+                max_children = task.budget.max_child_agents
+                if max_children is not None and len(child_ids) > max_children:
+                    trip_budget(
+                        f"child-agent budget exceeded: {len(child_ids)} > {max_children}",
+                        "Child-agent budget exceeded; cancellation requested",
+                    )
+
             if callable(external_progress):
                 try:
                     external_progress(event)
@@ -263,7 +476,11 @@ class ProviderRegistry:
                 if profile is not None:
                     result = self._execute_profile_chain(task, config, profile)
                 else:
-                    result = self._execute_provider(task)
+                    result = (
+                        self._execute_auto_chain(task)
+                        if task.provider == "auto"
+                        else self._execute_provider(task)
+                    )
         except Exception as exc:
             updates: dict[str, Any] = {
                 "error": f"Unhandled CortexRelay runtime error: {exc}",
@@ -291,7 +508,7 @@ class ProviderRegistry:
         stored = self.run_store.get_task(source_workspace, task_id) or {}
         if stored.get("budget_exceeded") and not budget_error:
             budget_error = str(stored.get("budget_reason") or "task budget exceeded")
-        if budget_error and result.status not in {"cancelled", "timeout"}:
+        if budget_error and result.status != "timeout":
             result = TaskResult(
                 status="budget_exceeded",
                 provider=result.provider,
@@ -305,6 +522,7 @@ class ProviderRegistry:
                 risks=result.risks,
                 conversation_id=result.conversation_id,
                 error=budget_error,
+                termination_reason="supervisor_budget",
                 duration_seconds=result.duration_seconds,
                 usage=result.usage,
                 metadata=result.metadata,
@@ -743,7 +961,7 @@ class ProviderRegistry:
         try:
             result = self._finish_agent_session(
                 agent_session_id,
-                provider.execute_session(task),
+                self._run_provider_session(provider, task),
             )
         except Exception as exc:
             result = self._finish_agent_session(
@@ -774,6 +992,43 @@ class ProviderRegistry:
         except (OSError, ValueError):
             pass
         return finalized
+
+    def _execute_auto_chain(self, task: TaskSpec) -> TaskResult:
+        """Try healthy available providers for an unprofiled auto-routed workflow task."""
+        names = self._ordered_provider_names(task)
+        last: TaskResult | None = None
+        attempts: list[dict[str, Any]] = []
+        for index, name in enumerate(names, start=1):
+            effective = replace(
+                task,
+                provider=name,
+                metadata={**task.metadata, "_worktree_attempt": index},
+            )
+            result = self._execute_provider(effective)
+            attempts.append(
+                {
+                    "attempt": index,
+                    "provider": name,
+                    "status": result.status,
+                    "termination_reason": result.termination_reason,
+                    "error": result.error,
+                }
+            )
+            result = replace(
+                result,
+                metadata={
+                    **result.metadata,
+                    "auto_routing_attempts": list(attempts),
+                    "health_routed": True,
+                },
+            )
+            last = result
+            if result.ok or result.status in {"cancelled", "budget_exceeded"}:
+                return result
+            if result.status not in {"unavailable", "timeout", "error", "interrupted"}:
+                return result
+        assert last is not None
+        return last
 
     def _execute_provider(self, task: TaskSpec) -> TaskResult:
         cancel_event = task.metadata.get("_cancel_event")
@@ -808,7 +1063,7 @@ class ProviderRegistry:
             )
             task, agent_session_id = self._start_agent_session(task, provider)
             return self._finish_agent_session(
-                agent_session_id, provider.execute_session(task)
+                agent_session_id, self._run_provider_session(provider, task)
             )
 
         self._observe(task, status="preparing", provider=provider.name)
@@ -891,7 +1146,7 @@ class ProviderRegistry:
         isolated = replace(task, workspace=worktree.path, isolate_write=False)
         isolated, agent_session_id = self._start_agent_session(isolated, provider)
         result = self._finish_agent_session(
-            agent_session_id, provider.execute_session(isolated)
+            agent_session_id, self._run_provider_session(provider, isolated)
         )
         metadata = dict(result.metadata)
         metadata.update(
