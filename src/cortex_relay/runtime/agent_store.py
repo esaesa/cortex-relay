@@ -268,6 +268,48 @@ class AgentStore:
                 raise ValueError(f"unknown agent session: {session_id}")
         return self.get(session_id)
 
+    def merge_metadata(
+        self,
+        session_id: str,
+        updates: dict[str, Any],
+    ) -> AgentSession:
+        """Atomically merge metadata without clobbering concurrent fields."""
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT metadata FROM agent_sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"unknown agent session: {session_id}")
+                metadata = _loads(row["metadata"], {})
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                merged = {**metadata, **updates}
+                conn.execute(
+                    """
+                    UPDATE agent_sessions
+                    SET metadata = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (
+                        json.dumps(
+                            merged,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
+                        _utc_now(),
+                        session_id,
+                    ),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return self.get(session_id)
+
     def bind_provider_session(
         self, session_id: str, provider_session_id: str | None
     ) -> AgentSession:
