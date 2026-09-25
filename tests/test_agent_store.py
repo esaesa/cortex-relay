@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from cortex_relay.core.agents import AgentEvent
+from cortex_relay.runtime.agent_backend import AgentStoreBackend
 from cortex_relay.runtime.agent_store import AgentStore
 
 
@@ -20,6 +21,11 @@ class AgentStoreTests(unittest.TestCase):
             role="explorer",
             objective="inspect",
         )
+
+    def test_sqlite_store_satisfies_backend_contract(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AgentStore(Path(tmp) / "state")
+            self.assertIsInstance(store, AgentStoreBackend)
 
     def test_schema_version_and_integrity_are_reported(self):
         with tempfile.TemporaryDirectory() as tmp:

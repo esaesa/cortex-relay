@@ -427,24 +427,28 @@ class AgentServiceTests(unittest.TestCase):
                 lease_ttl_seconds=2,
                 lease_heartbeat_seconds=0.2,
             )
-            self.addCleanup(service.shutdown)
+            try:
+                started = service.start_async(
+                    objective="long turn",
+                    provider="fake",
+                    workspace=workspace,
+                    timeout_seconds=30,
+                )
+                session_id = started["agent_session_id"]
+                cancelled = service.cancel(session_id)
+                self.assertTrue(cancelled["cancel_requested"])
+                self.assertTrue(cancelled["delivered"])
 
-            started = service.start_async(
-                objective="long turn",
-                provider="fake",
-                workspace=workspace,
-                timeout_seconds=30,
-            )
-            session_id = started["agent_session_id"]
-            cancelled = service.cancel(session_id)
-            self.assertTrue(cancelled["cancel_requested"])
-            self.assertTrue(cancelled["delivered"])
-
-            completed = service.wait(session_id, timeout_seconds=5)
-            self.assertTrue(completed["complete"])
-            self.assertEqual(completed["status"], "interrupted")
-            self.assertEqual(completed["result"]["status"], "cancelled")
-            self.assertIsNone(service.store.lease(session_id))
+                completed = service.wait(session_id, timeout_seconds=5)
+                self.assertTrue(completed["complete"])
+                self.assertEqual(completed["status"], "interrupted")
+                self.assertEqual(completed["result"]["status"], "cancelled")
+                self.assertIsNone(service.store.lease(session_id))
+            finally:
+                # The service owns a heartbeat thread. Stop it while the
+                # TemporaryDirectory still exists so Windows can close SQLite
+                # before the state directory is removed.
+                service.shutdown()
 
     def test_close_rejects_active_turn_and_send_rejects_closed_session(self):
         with tempfile.TemporaryDirectory() as tmp:
