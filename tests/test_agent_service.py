@@ -444,6 +444,7 @@ class AgentServiceTests(unittest.TestCase):
             self.assertTrue(completed["complete"])
             self.assertEqual(completed["status"], "interrupted")
             self.assertEqual(completed["result"]["status"], "cancelled")
+            self.assertIsNone(service.store.lease(session_id))
 
     def test_close_rejects_active_turn_and_send_rejects_closed_session(self):
         with tempfile.TemporaryDirectory() as tmp:
