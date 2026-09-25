@@ -443,15 +443,9 @@ class ProviderRegistry:
                     else None
                 )
             if observed is not None and observed > limit:
-                cancel_event = task.metadata.get("_cancel_event")
-                if cancel_event is not None:
-                    cancel_event.set()
-                self.run_store.update_task(
-                    source_workspace,
-                    task_id,
-                    budget_exceeded=True,
-                    budget_reason=f"token budget exceeded: {observed} > {limit}",
-                    current_activity="Token budget exceeded; cancellation requested",
+                trip_budget(
+                    f"token budget exceeded: {observed} > {limit}",
+                    "Token budget exceeded; cancellation requested",
                 )
 
         metadata["_progress_line"] = progress_line
@@ -646,6 +640,7 @@ class ProviderRegistry:
             metadata={
                 "transport": provider.capabilities().session_mode,
                 "profile": task.profile,
+                "budget": task.budget.to_dict(),
             },
         )
         self.agent_store.add_message(
@@ -717,7 +712,7 @@ class ProviderRegistry:
                     if finalized.status == "success"
                     else (
                         "interrupted"
-                        if finalized.status in {"cancelled", "timeout"}
+                        if finalized.status in {"cancelled", "timeout", "budget_exceeded"}
                         else "failed"
                     )
                 ),
@@ -736,7 +731,7 @@ class ProviderRegistry:
                         if finalized.status == "success"
                         else (
                             "interrupted"
-                            if finalized.status in {"cancelled", "timeout"}
+                            if finalized.status in {"cancelled", "timeout", "budget_exceeded"}
                             else "failed"
                         )
                     ),
@@ -913,11 +908,41 @@ class ProviderRegistry:
             provider,
         )
 
+        supervision: dict[str, Any] = {
+            "tool_calls": 0,
+            "last_tool_fingerprint": None,
+            "repeated_calls": 0,
+            "child_ids": set(),
+        }
+
+        def trip_direct_budget(reason: str, activity: str) -> None:
+            cancel_event = task.metadata.get("_cancel_event")
+            if cancel_event is not None and hasattr(cancel_event, "set"):
+                cancel_event.set()
+            try:
+                self.agent_store.merge_metadata(
+                    agent_session_id,
+                    {
+                        "budget_exceeded": True,
+                        "budget_reason": reason,
+                        "termination_reason": "supervisor_budget",
+                        "current_activity": activity,
+                    },
+                )
+            except (OSError, ValueError):
+                pass
+
         def progress_line(
             provider_name: str,
             line: str,
             stream: str = "stdout",
         ) -> None:
+            semantic = normalize_progress(
+                provider_name,
+                line,
+                agent_session_id,
+                stream,
+            )
             for event in normalize_agent_events(
                 provider_name,
                 line,
@@ -931,6 +956,65 @@ class ProviderRegistry:
                         "failed to persist direct agent event for %s: %s",
                         agent_session_id,
                         exc,
+                    )
+
+            progress_hook = task.metadata.get("_agent_progress")
+            if semantic is not None and callable(progress_hook):
+                try:
+                    progress_hook(agent_session_id)
+                except Exception:
+                    pass
+
+            if semantic is None:
+                return
+            if semantic.phase == "tool" and semantic.state == "active":
+                supervision["tool_calls"] = int(supervision["tool_calls"]) + 1
+                fingerprint = (
+                    str(semantic.tool or ""),
+                    str(semantic.command or ""),
+                    str(semantic.path or ""),
+                )
+                if fingerprint == supervision["last_tool_fingerprint"]:
+                    supervision["repeated_calls"] = int(supervision["repeated_calls"]) + 1
+                else:
+                    supervision["last_tool_fingerprint"] = fingerprint
+                    supervision["repeated_calls"] = 1
+
+                max_tools = task.budget.max_tool_calls
+                if max_tools is not None and int(supervision["tool_calls"]) > max_tools:
+                    trip_direct_budget(
+                        f"tool-call budget exceeded: {supervision['tool_calls']} > {max_tools}",
+                        "Tool-call budget exceeded; cancellation requested",
+                    )
+                max_repeated = task.budget.max_repeated_calls
+                if (
+                    max_repeated is not None
+                    and int(supervision["repeated_calls"]) > max_repeated
+                ):
+                    trip_direct_budget(
+                        "repeated tool-call budget exceeded: "
+                        f"{supervision['repeated_calls']} > {max_repeated}; "
+                        f"fingerprint={fingerprint!r}",
+                        "Repeated tool-call stall detected; cancellation requested",
+                    )
+
+            child_ids = supervision["child_ids"]
+            if isinstance(child_ids, set):
+                for child in semantic.subagents:
+                    if not isinstance(child, dict):
+                        continue
+                    child_id = (
+                        child.get("provider_session_id")
+                        or child.get("session_id")
+                        or child.get("id")
+                    )
+                    if child_id:
+                        child_ids.add(str(child_id))
+                max_children = task.budget.max_child_agents
+                if max_children is not None and len(child_ids) > max_children:
+                    trip_direct_budget(
+                        f"child-agent budget exceeded: {len(child_ids)} > {max_children}",
+                        "Child-agent budget exceeded; cancellation requested",
                     )
 
         def progress_heartbeat(pid: int, alive: bool) -> None:
@@ -959,9 +1043,25 @@ class ProviderRegistry:
             },
         )
         try:
+            provider_result = self._run_provider_session(provider, task)
+            try:
+                session_metadata = self.agent_store.get(agent_session_id).metadata
+            except (OSError, ValueError):
+                session_metadata = {}
+            if session_metadata.get("budget_exceeded"):
+                provider_result = replace(
+                    provider_result,
+                    status="budget_exceeded",
+                    summary="CortexRelay stopped the direct agent after a supervision budget was exceeded.",
+                    error=str(
+                        session_metadata.get("budget_reason")
+                        or "direct-agent supervision budget exceeded"
+                    ),
+                    termination_reason="supervisor_budget",
+                )
             result = self._finish_agent_session(
                 agent_session_id,
-                self._run_provider_session(provider, task),
+                provider_result,
             )
         except Exception as exc:
             result = self._finish_agent_session(
