@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,7 @@ def create_server(
     """Create the optional MCP v2 server without importing MCP at package import time."""
 
     try:
-        from mcp.server import MCPServer
+        from mcp.server.mcpserver import Context, MCPServer
     except ImportError as exc:  # pragma: no cover - depends on optional extra
         raise RuntimeError(
             'MCP support is not installed. Install with: pip install "cortex-relay[mcp]"'
@@ -177,7 +179,8 @@ def create_server(
         Use this only when task-level workflow guarantees are needed: DAG dependencies,
         scheduler/priority, budgets, worktree isolation, quality gates, or artifact
         lineage. For independent parallel persistent specialists, use agent_start_async
-        instead so no unnecessary workflow task wrapper is created.
+        instead. Never use delegate_async as a visibility/retry fallback for a still-
+        running direct AgentSession; watch it with agent_watch and inspect agent_result.
         """
         task = _task_from_values(
             objective=objective, role=role, profile=profile, preset=preset,
@@ -357,6 +360,80 @@ def create_server(
             session_id,
             timeout_seconds=timeout_seconds,
         )
+
+    @server.tool()
+    async def agent_watch(
+        session_id: str,
+        ctx: Context,
+        after_sequence: int = 0,
+        timeout_seconds: float = 10,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Watch one active direct agent and surface visible progress.
+
+        While this call is open, new semantic events are forwarded through MCP
+        progress notifications when the client renders them. The returned updates[]
+        always contains the same human-readable activity for clients that do not.
+        A running direct session is authoritative: do not replace it with a new
+        delegate/delegate_async task merely because no update arrived yet.
+        """
+        if after_sequence < 0:
+            raise ValueError("after_sequence must be non-negative")
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be non-negative")
+        if not 1 <= limit <= 200:
+            raise ValueError("limit must be 1..200")
+
+        deadline = asyncio.get_running_loop().time() + min(timeout_seconds, 30.0)
+        cursor = after_sequence
+        raw_events: list[dict[str, Any]] = []
+        updates: list[str] = []
+
+        while True:
+            payload = agent_control.events(
+                session_id,
+                after_sequence=cursor,
+                limit=max(1, limit - len(raw_events)),
+            )
+            new_events = payload["events"]
+            if new_events:
+                raw_events.extend(new_events)
+                cursor = payload["next_sequence"]
+                for event in new_events:
+                    update = agent_control.format_event(event)
+                    if update:
+                        updates.append(update)
+                        try:
+                            await ctx.report_progress(
+                                progress=float(cursor),
+                                total=None,
+                                message=update,
+                            )
+                        except Exception:
+                            pass
+
+            session = agent_control.get(session_id)
+            complete = session["state"] not in {"starting", "running"}
+            if complete or len(raw_events) >= limit:
+                break
+            if timeout_seconds == 0 or asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.15)
+
+        if not updates and not complete:
+            updates.append("Agent is still running; no new semantic event yet.")
+
+        return {
+            "agent_session_id": session_id,
+            "status": session["state"],
+            "complete": complete,
+            "authoritative_session": True,
+            "replacement_recommended": False,
+            "events": raw_events,
+            "updates": updates,
+            "next_sequence": cursor,
+            "result": agent_control.result(session_id) if complete else None,
+        }
 
     @server.tool()
     def agent_result(session_id: str) -> dict[str, Any] | None:
