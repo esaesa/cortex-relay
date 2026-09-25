@@ -243,6 +243,13 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--a2a-workspace", type=Path, default=Path.cwd())
     serve_parser.add_argument("--a2a-access", choices=RUNTIME_ACCESS, default="read_only")
     serve_parser.add_argument("--a2a-timeout", type=int, default=300)
+    serve_parser.add_argument("--a2a-max-tokens", type=int)
+    serve_parser.add_argument("--a2a-max-cost", type=float)
+    serve_parser.add_argument("--a2a-max-tool-calls", type=int)
+    serve_parser.add_argument("--a2a-max-repeated-calls", type=int)
+    serve_parser.add_argument("--a2a-max-idle-seconds", type=int)
+    serve_parser.add_argument("--a2a-max-runtime-seconds", type=int)
+    serve_parser.add_argument("--a2a-max-child-agents", type=int)
     serve_parser.add_argument(
         "--a2a-isolate-write",
         action=argparse.BooleanOptionalAction,
@@ -850,6 +857,15 @@ def _serve(args: argparse.Namespace) -> int:
                 access=args.a2a_access,
                 timeout_seconds=args.a2a_timeout,
                 isolate_write=args.a2a_isolate_write,
+                budget=TaskBudget(
+                    max_tokens=args.a2a_max_tokens,
+                    max_cost=args.a2a_max_cost,
+                    max_tool_calls=args.a2a_max_tool_calls,
+                    max_repeated_calls=args.a2a_max_repeated_calls,
+                    max_idle_seconds=args.a2a_max_idle_seconds,
+                    max_runtime_seconds=args.a2a_max_runtime_seconds,
+                    max_child_agents=args.a2a_max_child_agents,
+                ),
             )
             public_url = resolve_public_url(
                 host=args.host,
