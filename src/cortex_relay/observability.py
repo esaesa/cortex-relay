@@ -212,19 +212,25 @@ class RunStore:
             "process_alive": False,
             "last_heartbeat_at": None,
         }
-        self._write_record(path, record, required=async_task)
-        if async_task:
-            index = {
-                "schema_version": 1,
-                "task_id": task_id,
-                "workspace": str(_workspace(task.workspace)),
-                "created_at": now,
-            }
-            try:
-                self._write_record(self._index_path(task_id), index, required=True)
-            except OSError:
-                path.unlink(missing_ok=True)
-                raise
+        # Publish the task record and global async index under the same per-task
+        # lock. The index is only visible after the task record is durable, and
+        # indexed readers acquire the same lock before trusting the pair.
+        with self._task_lock(task.workspace, task_id):
+            if path.exists():
+                raise FileExistsError(f"task id already exists: {task_id}")
+            self._write_record(path, record, required=async_task)
+            if async_task:
+                index = {
+                    "schema_version": 1,
+                    "task_id": task_id,
+                    "workspace": str(_workspace(task.workspace)),
+                    "created_at": now,
+                }
+                try:
+                    self._write_record(self._index_path(task_id), index, required=True)
+                except OSError:
+                    path.unlink(missing_ok=True)
+                    raise
         return task_id
 
     def find_task(self, task_id: str) -> tuple[Path, dict[str, Any]]:
@@ -240,9 +246,23 @@ class RunStore:
             if not isinstance(workspace_value, str):
                 raise ValueError(f"task index lacks workspace: {task_id}")
             workspace = _workspace(Path(workspace_value))
-            record = self.get_task(workspace, task_id)
-            if not record or record.get("task_id") != task_id or record.get("workspace") != str(workspace):
-                raise ValueError(f"task index does not match its record: {task_id}")
+            with self._task_lock(workspace, task_id):
+                # Re-read the index after taking the task lock so an indexed
+                # lookup observes the same publication boundary as start_task.
+                latest_index = self._read_record(index_path)
+                if (
+                    not latest_index
+                    or latest_index.get("task_id") != task_id
+                    or latest_index.get("workspace") != str(workspace)
+                ):
+                    raise ValueError(f"task index changed while resolving: {task_id}")
+                record = self.get_task(workspace, task_id)
+                if (
+                    not record
+                    or record.get("task_id") != task_id
+                    or record.get("workspace") != str(workspace)
+                ):
+                    raise ValueError(f"task index does not match its record: {task_id}")
             return workspace, record
 
         matches: list[tuple[Path, dict[str, Any]]] = []
