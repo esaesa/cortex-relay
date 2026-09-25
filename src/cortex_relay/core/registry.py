@@ -649,12 +649,19 @@ class ProviderRegistry:
                 agent_session_id,
                 provider.execute_session(task),
             )
-        except Exception:
+        except Exception as exc:
             try:
                 self.agent_store.update(agent_session_id, state="failed")
             except (OSError, ValueError):
                 pass
-            raise
+            result = TaskResult(
+                status="error",
+                provider=provider.name,
+                model=task.model,
+                summary="Direct agent execution failed.",
+                error=str(exc),
+                metadata={"agent_session_id": agent_session_id},
+            )
 
         finalized = replace(
             result,
