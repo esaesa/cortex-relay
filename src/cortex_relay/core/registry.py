@@ -9,6 +9,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 from cortex_relay.core.models import TaskResult, TaskSpec
+from cortex_relay.runtime.agent_backend import AgentStoreBackend
 from cortex_relay.runtime.agent_store import AgentStore
 from cortex_relay.runtime.agent_events import normalize_agent_events
 from cortex_relay.core.policy import RoutingPolicy
@@ -35,7 +36,7 @@ class ProviderRegistry:
         worktrees: WorktreeManager | None = None,
         profiles: ProfileResolver | None = None,
         run_store: RunStore | None = None,
-        agent_store: AgentStore | None = None,
+        agent_store: AgentStoreBackend | None = None,
     ) -> None:
         self._providers: dict[str, ProviderAdapter] = {}
         self.policy = policy or RoutingPolicy()
