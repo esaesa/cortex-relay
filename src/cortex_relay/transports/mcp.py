@@ -33,6 +33,7 @@ def create_server(
             "The calling agent remains responsible for planning and final synthesis. "
             "Use synchronous delegate when you need the worker's output before you can answer the user's immediate request. "
             "Use delegate_async for parallel work or staged pipelines, then poll task_wait until the task reaches terminal status. "
+            "Successful results include final_text with the worker's complete answer; for large answers use task_output to retrieve it in chunks. "
             "Never end a turn with uncompleted async tasks when the user is awaiting the outcome. "
             "Set access=workspace_write explicitly for implementation tasks. Use status/history to inspect work."
         ),
@@ -220,6 +221,19 @@ def create_server(
     def task_artifact(task_id: str, create: bool = True) -> dict[str, Any]:
         """Return or create the immutable patch artifact produced by a task."""
         return async_tasks.artifact(task_id, create=create)
+
+    @server.tool()
+    def task_output(
+        task_id: str,
+        offset: int = 0,
+        max_chars: int = 65536,
+    ) -> dict[str, Any]:
+        """Return the complete child final answer, optionally in bounded chunks."""
+        return async_tasks.output(
+            task_id,
+            offset=offset,
+            max_chars=max_chars,
+        )
 
     @server.tool()
     def task_worktree(task_id: str, attempt: int | None = None) -> dict[str, Any]:
