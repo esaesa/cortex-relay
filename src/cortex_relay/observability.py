@@ -684,12 +684,17 @@ class RunStore:
 
         agent_store = AgentStore(self.root)
         agents: list[dict[str, Any]] = []
+        all_agents: list[dict[str, Any]] = []
         if not completed_only:
-            agents = agent_store.list(
+            all_agents = agent_store.list(
                 workspace=_workspace(workspace),
-                active_only=active_only,
-                limit=limit,
+                active_only=False,
             )
+            agents = [
+                agent
+                for agent in all_agents
+                if not active_only or agent.get("state") in {"starting", "running"}
+            ][: max(1, limit)]
             for agent in agents:
                 session_id = agent.get("session_id")
                 if not isinstance(session_id, str):
@@ -714,13 +719,13 @@ class RunStore:
             for item in tasks
         )
         agent_running = sum(
-            item.get("state") in {"starting", "running"} for item in agents
+            item.get("state") in {"starting", "running"} for item in all_agents
         )
-        agent_idle = sum(item.get("state") == "idle" for item in agents)
+        agent_idle = sum(item.get("state") == "idle" for item in all_agents)
         agent_failed = sum(
-            item.get("state") in {"failed", "interrupted"} for item in agents
+            item.get("state") in {"failed", "interrupted"} for item in all_agents
         )
-        agent_closed = sum(item.get("state") == "closed" for item in agents)
+        agent_closed = sum(item.get("state") == "closed" for item in all_agents)
 
         total_input = 0
         total_output = 0
@@ -760,7 +765,7 @@ class RunStore:
                 "idle": agent_idle,
                 "failed": agent_failed,
                 "closed": agent_closed,
-                "total": len(agents),
+                "total": len(all_agents),
             },
         }
 
@@ -1184,15 +1189,16 @@ def render_dashboard(
 
     agents = snapshot.get("agents") or []
     agent_summary = snapshot.get("agent_summary") or {}
-    agent_totals = [
-        f"Agents: running {agent_summary.get('running', 0)}",
-        f"idle {agent_summary.get('idle', 0)}",
-        f"failed {agent_summary.get('failed', 0)}",
-    ]
-    closed = int(agent_summary.get("closed") or 0)
-    if closed:
-        agent_totals.append(f"closed {closed}")
-    lines.append(" | ".join(agent_totals))
+    if not completed_only:
+        agent_totals = [
+            f"Agents: running {agent_summary.get('running', 0)}",
+            f"idle {agent_summary.get('idle', 0)}",
+            f"failed {agent_summary.get('failed', 0)}",
+        ]
+        closed = int(agent_summary.get("closed") or 0)
+        if closed:
+            agent_totals.append(f"closed {closed}")
+        lines.append(" | ".join(agent_totals))
     lines.append("")
 
     tasks = snapshot.get("tasks") or []
