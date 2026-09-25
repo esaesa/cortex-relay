@@ -16,7 +16,7 @@ from cortex_relay.runtime.process import (
 )
 from cortex_relay.runtime.progress import runner_progress_kwargs
 
-from .base import ProviderAdapter, ProviderCapabilities
+from .base import ProviderAdapter, ProviderCapabilities, task_execution_constraints
 from .codex_app_server import CodexAppServerClient, CodexAppServerError
 from .codex_models import compatibility_error, known_model_ids
 from .result_schema import RESULT_SCHEMA
@@ -428,6 +428,7 @@ class CodexAdapter(ProviderAdapter):
             f"{access_instruction}\n\n"
             "Acceptance criteria:\n"
             f"{criteria}\n\n"
+            f"{task_execution_constraints(task)}\n\n"
             "Return structured output only. Keep summary compact, but put your COMPLETE answer "
             "to the parent in final_text. Do not compress final_text into a synopsis; preserve all "
             "material findings, conclusions, implementation details, caveats, and recommendations "
