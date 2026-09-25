@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     status_parser = subparsers.add_parser(
         "status",
-        help="Show current and recent CortexRelay delegation status for this workspace.",
+        help="Show unified host, workflow-task, and agent-session status for this workspace.",
     )
     status_parser.add_argument("--workspace", type=Path, default=Path.cwd())
     status_parser.add_argument("--limit", type=int, default=12)
