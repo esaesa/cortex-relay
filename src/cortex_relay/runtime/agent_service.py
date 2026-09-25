@@ -37,6 +37,7 @@ class AgentService:
             thread_name_prefix="cortex-agent",
         )
         self._futures: dict[str, Future[Any]] = {}
+        self._cancel_events: dict[str, threading.Event] = {}
         self._lock = threading.Lock()
         self._lease_ttl_seconds = lease_ttl_seconds
         self._lease_heartbeat_seconds = lease_heartbeat_seconds
@@ -237,11 +238,14 @@ class AgentService:
     ) -> dict[str, Any]:
         """Start a direct persistent provider-backed agent session and await its first turn."""
         holder: dict[str, str] = {}
+        cancel_event = threading.Event()
 
         def on_started(session_id: str) -> None:
             owner_id = self._begin_lease(session_id)
             holder["session_id"] = session_id
             holder["owner_id"] = owner_id
+            with self._lock:
+                self._cancel_events[session_id] = cancel_event
 
         task = self._build_task(
             objective=objective,
@@ -257,6 +261,12 @@ class AgentService:
             parent_session_id=parent_session_id,
             on_started=on_started,
         )
+        task = TaskSpec(
+            **{
+                **task.__dict__,
+                "metadata": {**task.metadata, "_cancel_event": cancel_event},
+            }
+        )
         try:
             result = self.registry.start_agent(task)
         finally:
@@ -264,6 +274,9 @@ class AgentService:
             owner_id = holder.get("owner_id")
             if session_id and owner_id:
                 self._end_lease(session_id, owner_id)
+            if session_id:
+                with self._lock:
+                    self._cancel_events.pop(session_id, None)
 
         payload = result.to_dict()
         session_id = result.metadata.get("agent_session_id")
@@ -295,6 +308,7 @@ class AgentService:
         """
         started = threading.Event()
         holder: dict[str, str] = {}
+        cancel_event = threading.Event()
 
         def on_started(session_id: str) -> None:
             try:
@@ -306,6 +320,8 @@ class AgentService:
                 return
             holder["session_id"] = session_id
             holder["owner_id"] = owner_id
+            with self._lock:
+                self._cancel_events[session_id] = cancel_event
             started.set()
 
         task = self._build_task(
@@ -321,6 +337,12 @@ class AgentService:
             timeout_seconds=timeout_seconds,
             parent_session_id=parent_session_id,
             on_started=on_started,
+        )
+        task = TaskSpec(
+            **{
+                **task.__dict__,
+                "metadata": {**task.metadata, "_cancel_event": cancel_event},
+            }
         )
         future = self.executor.submit(self.registry.start_agent, task)
 
@@ -345,6 +367,7 @@ class AgentService:
         def _forget(_future: Future[Any]) -> None:
             with self._lock:
                 self._futures.pop(session_id, None)
+                self._cancel_events.pop(session_id, None)
             if owner_id:
                 self._end_lease(session_id, owner_id)
 
@@ -569,6 +592,9 @@ class AgentService:
                 f"agent session {session_id} is {session.state}; follow-up messages require an idle session"
             )
         lease_owner = self._begin_lease(session_id)
+        cancel_event = threading.Event()
+        with self._lock:
+            self._cancel_events[session_id] = cancel_event
         provider = self.registry.provider(session.provider)
         capabilities = provider.capabilities()
         if not capabilities.persistent_sessions:
@@ -620,6 +646,7 @@ class AgentService:
                     "_agent_session_id": session_id,
                     "_progress_line": progress_line,
                     "_resume_provider_session_id": session.provider_session_id,
+                    "_cancel_event": cancel_event,
                 },
             )
             try:
@@ -665,7 +692,49 @@ class AgentService:
             )
             return payload
         finally:
+            with self._lock:
+                self._cancel_events.pop(session_id, None)
             self._end_lease(session_id, lease_owner)
+
+    def cancel(self, session_id: str) -> dict[str, Any]:
+        """Request cancellation of the currently running direct agent turn."""
+        session = self.store.get(session_id)
+        if session.state not in {"starting", "running"}:
+            return {
+                "agent_session_id": session_id,
+                "status": session.state,
+                "cancel_requested": False,
+                "complete": True,
+                "detail": "session has no active turn",
+            }
+
+        with self._lock:
+            cancel_event = self._cancel_events.get(session_id)
+        if cancel_event is None:
+            metadata = dict(session.metadata)
+            metadata["cancel_requested"] = True
+            metadata["cancel_delivery"] = "unavailable_after_runtime_restart"
+            self.store.update(session_id, metadata=metadata)
+            return {
+                "agent_session_id": session_id,
+                "status": session.state,
+                "cancel_requested": True,
+                "complete": False,
+                "delivered": False,
+                "detail": (
+                    "cancellation intent persisted, but this process does not own "
+                    "the provider turn; wait for its lease to expire or reconnect to the owner"
+                ),
+            }
+
+        cancel_event.set()
+        return {
+            "agent_session_id": session_id,
+            "status": session.state,
+            "cancel_requested": True,
+            "complete": False,
+            "delivered": True,
+        }
 
     def close(self, session_id: str) -> dict[str, Any]:
         return self.store.close(session_id).to_dict()
