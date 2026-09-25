@@ -77,7 +77,7 @@ class ObservabilityTests(unittest.TestCase):
             self.assertEqual(record["tests"], ["18 passed"])
             self.assertEqual(record["output_chars"], len("Implemented the authentication fix in full detail.\nSecond line."))
             output = store.get_output(workspace, task_id, offset=0, max_chars=20)
-            self.assertEqual(output["text"], "Implemented the aut")
+            self.assertEqual(output["text"], "Implemented the auth")
             self.assertFalse(output["complete"])
             remainder = store.get_output(
                 workspace,
@@ -218,15 +218,7 @@ class ObservabilityTests(unittest.TestCase):
             store = RunStore(root)
 
             done_id = store.start_task(TaskSpec(objective="Done", workspace=workspace))
-            store.complete_task(
-                workspace,
-                done_id,
-                TaskResult(status="success", provider="fake", summary="Done"),
-            )
-            active_id = store.start_task(TaskSpec(objective="Active", workspace=workspace))
-            store.update_task(workspace, active_id, status="running")
-
-            output_path = Path(store.complete_task(
+            done_record = store.complete_task(
                 workspace,
                 done_id,
                 TaskResult(
@@ -235,8 +227,11 @@ class ObservabilityTests(unittest.TestCase):
                     summary="Done",
                     final_text="full",
                 ),
-            )["output_path"])
+            )
+            output_path = Path(done_record["output_path"])
             self.assertTrue(output_path.exists())
+            active_id = store.start_task(TaskSpec(objective="Active", workspace=workspace))
+            store.update_task(workspace, active_id, status="running")
 
             removed = store.clear_completed(workspace)
             self.assertEqual(removed, 1)
