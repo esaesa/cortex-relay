@@ -577,7 +577,7 @@ def _orchestrator_contract(config, *, preset: str | None = None) -> str:
         "Keep planning, arbitration, routing decisions, and final synthesis in this host session.",
         "Delegate bounded work when it improves parallelism, specialization, cost, or context isolation.",
         "Prefer provider-native persistent agent sessions whenever they are available.",
-        "Use agent_start for direct specialists that may need follow-up turns, live events, or resume. Use delegate/delegate_async for DAG scheduling, worktree isolation, budgets, quality gates, or artifact handoff.",
+        "Use agent_start_async for independent parallel direct specialists, and agent_start when the first result is immediately required. Use delegate/delegate_async for DAG scheduling, worktree isolation, budgets, quality gates, or artifact handoff.",
         "CortexRelay owns the cross-provider control plane and must retain visibility of every delegated agent, including provider-native child agents.",
         "Use persistent agent sessions for work that may require live progress, follow-up instructions, multiple turns, child agents, interruption/resume, or detailed final-result retrieval.",
         "Use closed-end delegation only when a persistent session is unavailable or when the task is intentionally one-shot. Closed-end workers cannot be resumed or messaged after completion.",

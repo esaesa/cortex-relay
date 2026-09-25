@@ -98,11 +98,29 @@ class MCPTransportMappingTests(unittest.TestCase):
             t for t in server._tool_manager.list_tools() if t.name == "task_output"
         )
         self.assertIn("complete child final answer", output_tool.description)
+        delegate_async_tool = next(
+            t for t in server._tool_manager.list_tools() if t.name == "delegate_async"
+        )
+        self.assertIn("workflow task", delegate_async_tool.description)
+        self.assertIn("agent_start_async", delegate_async_tool.description)
         agent_start_tool = next(
             t for t in server._tool_manager.list_tools() if t.name == "agent_start"
         )
         self.assertIn("direct persistent/resumable agent session", agent_start_tool.description)
-        self.assertIn("Closed-end providers are rejected", agent_start_tool.description)
+        self.assertIn("access=auto", agent_start_tool.description)
+        async_start_tool = next(
+            t for t in server._tool_manager.list_tools() if t.name == "agent_start_async"
+        )
+        self.assertIn("parallel direct specialists", async_start_tool.description)
+        self.assertIn("access=auto", async_start_tool.description)
+        agent_wait_tool = next(
+            t for t in server._tool_manager.list_tools() if t.name == "agent_wait"
+        )
+        self.assertIn("at most five seconds", agent_wait_tool.description)
+        agent_result_tool = next(
+            t for t in server._tool_manager.list_tools() if t.name == "agent_result"
+        )
+        self.assertIn("latest durable completed-turn result", agent_result_tool.description)
         agent_events_tool = next(
             t for t in server._tool_manager.list_tools() if t.name == "agent_events"
         )

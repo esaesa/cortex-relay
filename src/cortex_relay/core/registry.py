@@ -156,6 +156,10 @@ class ProviderRegistry:
                 source=source,
             )
             last = result
+            if result.metadata.get("agent_session_id"):
+                # A direct persistent session has acquired identity. Never silently
+                # replace it with a different provider/session after launch.
+                return result
             if result.ok or result.status == "cancelled":
                 return result
             if result.status not in candidate.fallback_on:
@@ -395,6 +399,12 @@ class ProviderRegistry:
             recipient_session_id=session.session_id,
             metadata={"initial": True},
         )
+        on_started = task.metadata.get("_agent_session_started")
+        if callable(on_started):
+            try:
+                on_started(session.session_id)
+            except Exception:
+                pass
         task_id = task.metadata.get("_task_id")
         source_workspace = task.metadata.get("_observability_workspace")
         if isinstance(task_id, str) and isinstance(source_workspace, str):
@@ -444,7 +454,12 @@ class ProviderRegistry:
             pass
         metadata = dict(result.metadata)
         metadata["agent_session_id"] = session_id
-        return replace(result, metadata=metadata)
+        finalized = replace(result, metadata=metadata)
+        try:
+            self.agent_store.save_result(session_id, finalized.to_dict())
+        except (OSError, ValueError):
+            pass
+        return finalized
 
     def _observe(self, task: TaskSpec, **updates: Any) -> None:
         task_id = task.metadata.get("_task_id")
@@ -638,14 +653,21 @@ class ProviderRegistry:
                 agent_session_id,
                 provider.execute_session(task),
             )
-        except Exception:
+        except Exception as exc:
             try:
                 self.agent_store.update(agent_session_id, state="failed")
             except (OSError, ValueError):
                 pass
-            raise
+            result = TaskResult(
+                status="error",
+                provider=provider.name,
+                model=task.model,
+                summary="Direct agent execution failed.",
+                error=str(exc),
+                metadata={"agent_session_id": agent_session_id},
+            )
 
-        return replace(
+        finalized = replace(
             result,
             metadata={
                 **result.metadata,
@@ -654,6 +676,14 @@ class ProviderRegistry:
                 "workflow_task": False,
             },
         )
+        try:
+            self.agent_store.save_result(
+                agent_session_id,
+                finalized.to_dict(),
+            )
+        except (OSError, ValueError):
+            pass
+        return finalized
 
     def _execute_provider(self, task: TaskSpec) -> TaskResult:
         cancel_event = task.metadata.get("_cancel_event")

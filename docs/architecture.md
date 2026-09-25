@@ -185,7 +185,7 @@ Interactive host launches propagate only non-secret session identity fields (ses
 
 ### Protocol frontends
 
-MCP and A2A are peer frontends over the same runtime. MCP exposes provider/profile discovery, runtime status/history, single/parallel delegation, and first-class agent controls for starting direct persistent sessions, listing sessions, reading semantic events/messages, traversing children, sending follow-ups, and closing Cortex session handles. Direct `agent_start` sessions bypass workflow scheduling/worktree/artifact semantics; task delegation remains the workflow-oriented path. A2A exposes a server-side fixed delegation policy through an Agent Card, JSON-RPC, and HTTP+JSON so remote agents such as Gemini CLI can send bounded text tasks without controlling local filesystem or permission policy.
+MCP and A2A are peer frontends over the same runtime. MCP exposes provider/profile discovery, runtime status/history, single/parallel delegation, and first-class agent controls for starting direct persistent sessions synchronously or asynchronously, waiting for durable turn results, listing sessions, reading semantic events/messages, traversing children, sending follow-ups, and closing Cortex session handles. Direct `agent_start`/`agent_start_async` sessions bypass workflow scheduling/worktree/artifact semantics; task delegation remains the workflow-oriented path. Asynchronous direct starts expose the session before provider execution completes so events can be consumed immediately. A2A exposes a server-side fixed delegation policy through an Agent Card, JSON-RPC, and HTTP+JSON so remote agents such as Gemini CLI can send bounded text tasks without controlling local filesystem or permission policy.
 
 ## Configuration ownership
 

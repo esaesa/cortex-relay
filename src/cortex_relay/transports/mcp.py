@@ -33,7 +33,7 @@ def create_server(
         instructions=(
             "CortexRelay is a cross-provider agent control plane. "
             "Keep planning, arbitration, routing decisions, and final synthesis in the calling host. "
-            "Prefer persistent provider-native agent sessions when available. Use agent_start for direct resumable specialists, and use delegate/delegate_async for DAG, scheduler, budget, worktree, or artifact workflows. Treat closed-end execution as an explicit fallback for one-shot or unsupported cases. "
+            "Prefer persistent provider-native agent sessions when available. Use agent_start_async for parallel direct specialists, agent_start when the first result is immediately required, and delegate/delegate_async only for DAG, scheduler, budget, worktree, quality-gate, or artifact workflows. Direct-agent access defaults to the selected profile via access=auto. Treat closed-end execution as an explicit fallback for one-shot or unsupported cases. "
             "Every delegated agent and provider-native child must remain observable through CortexRelay with durable session identity, semantic events, messages, state, and complete final output. "
             "Use incremental cursors for live activity instead of repeatedly re-reading full state. "
             "Provider-native subagents are allowed, but they remain subject to CortexRelay depth, budget, access, scheduling, workspace, and quality policies. "
@@ -99,7 +99,11 @@ def create_server(
         allowed_paths: list[str] | None = None,
         max_failed_tests: int | None = None,
     ) -> dict[str, Any]:
-        """Delegate one bounded task and return a normalized structured result."""
+        """Run one bounded workflow/closed-end task and return its normalized result.
+
+        For a persistent specialist that may receive follow-up messages or resume,
+        use agent_start instead.
+        """
         task = _task_from_values(
             objective=objective,
             role=role,
@@ -168,7 +172,13 @@ def create_server(
         allowed_paths: list[str] | None = None,
         max_failed_tests: int | None = None,
     ) -> dict[str, Any]:
-        """Start a delegation and return its task ID immediately."""
+        """Start an asynchronous workflow task and return its task ID immediately.
+
+        Use this only when task-level workflow guarantees are needed: DAG dependencies,
+        scheduler/priority, budgets, worktree isolation, quality gates, or artifact
+        lineage. For independent parallel persistent specialists, use agent_start_async
+        instead so no unnecessary workflow task wrapper is created.
+        """
         task = _task_from_values(
             objective=objective, role=role, profile=profile, preset=preset,
             provider=provider, workspace=workspace, access=access,
@@ -269,15 +279,16 @@ def create_server(
         preset: str | None = None,
         provider: str = "auto",
         workspace: str = ".",
-        access: str = "read_only",
+        access: str = "auto",
         reasoning: str = "high",
         model: str | None = None,
         timeout_seconds: int = 300,
         parent_session_id: str | None = None,
     ) -> dict[str, Any]:
-        """Start a direct persistent/resumable agent session.
+        """Start a direct persistent/resumable agent session and await its first turn.
 
-        This bypasses task DAGs, scheduler queues, worktree isolation, task budgets,
+        access=auto inherits the selected profile's configured access. This bypasses
+        task DAGs, scheduler queues, worktree isolation, task budgets, quality gates,
         and artifact handoff. Use delegate/delegate_async when those workflow
         guarantees are required. Closed-end providers are rejected here.
         """
@@ -294,6 +305,63 @@ def create_server(
             timeout_seconds=timeout_seconds,
             parent_session_id=parent_session_id,
         )
+
+    @server.tool()
+    def agent_start_async(
+        objective: str,
+        role: str = "reviewer",
+        profile: str | None = None,
+        preset: str | None = None,
+        provider: str = "auto",
+        workspace: str = ".",
+        access: str = "auto",
+        reasoning: str = "high",
+        model: str | None = None,
+        timeout_seconds: int = 300,
+        parent_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Start a direct persistent/resumable agent concurrently.
+
+        Returns agent_session_id as soon as the Cortex session exists, without
+        creating a workflow task. Use this for parallel direct specialists and
+        consume agent_events with sequence cursors plus agent_wait for completion.
+        access=auto inherits the selected profile's configured access. Use
+        delegate_async instead when DAG scheduling, task budgets, worktree
+        isolation, quality gates, or artifact lineage are required.
+        """
+        return agent_control.start_async(
+            objective=objective,
+            role=role,
+            profile=profile,
+            preset=preset,
+            provider=provider,
+            workspace=workspace,
+            access=access,
+            reasoning=reasoning,
+            model=model,
+            timeout_seconds=timeout_seconds,
+            parent_session_id=parent_session_id,
+        )
+
+    @server.tool()
+    def agent_wait(
+        session_id: str,
+        timeout_seconds: float = 0,
+    ) -> dict[str, Any]:
+        """Poll or briefly wait (at most five seconds) for an agent turn.
+
+        Returns durable session state and the complete normalized turn result once
+        available. Prefer agent_events(after_sequence=...) for live progress.
+        """
+        return agent_control.wait(
+            session_id,
+            timeout_seconds=timeout_seconds,
+        )
+
+    @server.tool()
+    def agent_result(session_id: str) -> dict[str, Any] | None:
+        """Return the latest durable completed-turn result for an agent session."""
+        return agent_control.result(session_id)
 
     @server.tool()
     def agents(
