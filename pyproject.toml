@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cortex-relay"
-version = "0.9.0"
+dynamic = ["version"]
 description = "Provider-neutral delegation runtime and cost-aware multi-agent configuration for coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -49,3 +49,6 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "cortex_relay.__version__"}

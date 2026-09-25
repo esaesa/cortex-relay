@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.metadata
+
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -98,3 +100,50 @@ def runtime_checks(registry: ProviderRegistry) -> list[DiagnosticCheck]:
     if run_store is not None:
         checks.extend(task_store_checks(run_store))
     return checks
+
+
+def installed_distribution_version(distribution: str = "cortex-relay") -> str | None:
+    """Return the installed distribution version, or ``None`` when uninstalled."""
+    try:
+        return importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def version_check(
+    *,
+    module_version: str,
+    installed_version: str | None,
+    distribution: str = "cortex-relay",
+) -> DiagnosticCheck:
+    """Compare the importable module version with installed package metadata.
+
+    Packaging metadata is generated from ``cortex_relay.__version__``, so a
+    mismatch only means the installed distribution is stale and needs
+    ``pip install -e .``. The check is informational: it never changes the
+    doctor exit status.
+    """
+    name = "version:consistency"
+    if installed_version is None:
+        return DiagnosticCheck(
+            name=name,
+            ok=False,
+            detail=(
+                f"module={module_version} distribution=missing "
+                f"(install {distribution} to compare)"
+            ),
+        )
+    if installed_version != module_version:
+        return DiagnosticCheck(
+            name=name,
+            ok=False,
+            detail=(
+                f"module={module_version} distribution={installed_version} "
+                "(stale install: run `pip install -e .`)"
+            ),
+        )
+    return DiagnosticCheck(
+        name=name,
+        ok=True,
+        detail=f"module=distribution={module_version}",
+    )

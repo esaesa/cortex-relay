@@ -11,7 +11,12 @@ from . import __version__
 from .configurator import ConfigValues
 from .core.models import QualityGates, TaskBudget, TaskSpec
 from .core.registry import default_registry
-from .diagnostics import configuration_checks, runtime_checks
+from .diagnostics import (
+    configuration_checks,
+    installed_distribution_version,
+    runtime_checks,
+    version_check,
+)
 from .gemini import GEMINI_THINKING_LEVELS, GeminiConfigValues
 from .installer import install
 
@@ -279,11 +284,17 @@ def _doctor(provider: str, scope: str, project_dir: Path, *, runtime_only: bool)
     if not runtime_only:
         config = configuration_checks(provider=provider, scope=scope, project_dir=project_dir)
     runtime = runtime_checks(default_registry())
+    version = version_check(
+        module_version=__version__,
+        installed_version=installed_distribution_version(),
+    )
 
     print("CortexRelay diagnostics:")
-    for check in [*config, *runtime]:
+    for check in [version, *config, *runtime]:
         if check.ok:
             marker = "OK"
+        elif check.name.startswith("version:"):
+            marker = "WARN"
         elif check.name.startswith("config:"):
             marker = "MISSING"
         elif check.name.startswith("state:"):
