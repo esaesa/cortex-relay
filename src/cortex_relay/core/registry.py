@@ -395,6 +395,12 @@ class ProviderRegistry:
             recipient_session_id=session.session_id,
             metadata={"initial": True},
         )
+        on_started = task.metadata.get("_agent_session_started")
+        if callable(on_started):
+            try:
+                on_started(session.session_id)
+            except Exception:
+                pass
         task_id = task.metadata.get("_task_id")
         source_workspace = task.metadata.get("_observability_workspace")
         if isinstance(task_id, str) and isinstance(source_workspace, str):
@@ -444,7 +450,12 @@ class ProviderRegistry:
             pass
         metadata = dict(result.metadata)
         metadata["agent_session_id"] = session_id
-        return replace(result, metadata=metadata)
+        finalized = replace(result, metadata=metadata)
+        try:
+            self.agent_store.save_result(session_id, finalized.to_dict())
+        except (OSError, ValueError):
+            pass
+        return finalized
 
     def _observe(self, task: TaskSpec, **updates: Any) -> None:
         task_id = task.metadata.get("_task_id")
