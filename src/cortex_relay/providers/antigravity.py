@@ -8,6 +8,10 @@ from typing import Any
 
 from cortex_relay.core.models import Evidence, TaskResult, TaskSpec
 from cortex_relay.runtime.progress import runner_progress_kwargs
+from cortex_relay.runtime.recovery import (
+    print_timeout_reserve_seconds,
+    recovery_attempt,
+)
 from cortex_relay.runtime.process import (
     ProcessCancelledError,
     ProcessIdleTimeoutError,
@@ -413,9 +417,12 @@ def _supports_effort(model: str | None) -> bool:
 
 
 def _provider_timeout_seconds(task: TaskSpec) -> int:
-    """Reserve a small outer-runtime window for diagnostics and graceful cleanup."""
+    """Reserve an outer-runtime window for diagnostics and session recovery."""
     explicit = task.metadata.get("_provider_timeout_seconds")
     if isinstance(explicit, (int, float)) and explicit > 0:
         return max(1, min(int(explicit), task.timeout_seconds))
-    reserve = min(15, max(1, task.timeout_seconds // 10))
-    return max(1, task.timeout_seconds - reserve)
+    reserve = print_timeout_reserve_seconds(
+        float(task.timeout_seconds),
+        attempt=recovery_attempt(task),
+    )
+    return max(1, task.timeout_seconds - int(reserve))

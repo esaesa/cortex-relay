@@ -14,6 +14,7 @@ from cortex_relay.core.models import TaskBudget, TaskSpec
 from cortex_relay.core.registry import ProviderRegistry
 from cortex_relay.runtime.agent_events import normalize_agent_events
 from cortex_relay.runtime.progress import normalize_progress
+from cortex_relay.runtime.recovery import stamp_logical_deadline
 from cortex_relay.runtime.supervision import SupervisionTracker
 
 
@@ -233,9 +234,15 @@ class AgentService:
             model=model,
             timeout_seconds=timeout_seconds,
         )
+        effective_timeout = (
+            min(timeout_seconds, max_runtime_seconds)
+            if max_runtime_seconds is not None
+            else timeout_seconds
+        )
         metadata: dict[str, Any] = {
             "_agent_progress": self._renew_lease_on_progress,
         }
+        stamp_logical_deadline(metadata, float(effective_timeout))
         if parent_session_id is not None:
             parent = self.store.get(parent_session_id)
             if parent.workspace.resolve() != resolved_workspace:
@@ -254,11 +261,7 @@ class AgentService:
             access=resolved_access,  # type: ignore[arg-type]
             reasoning=reasoning,
             model=model,
-            timeout_seconds=(
-                min(timeout_seconds, max_runtime_seconds)
-                if max_runtime_seconds is not None
-                else timeout_seconds
-            ),
+            timeout_seconds=effective_timeout,
             isolate_write=False,
             budget=TaskBudget(
                 max_tool_calls=max_tool_calls,
@@ -778,6 +781,13 @@ class AgentService:
                 if budget.max_runtime_seconds is not None
                 else timeout_seconds
             )
+            task_metadata: dict[str, Any] = {
+                "_agent_session_id": session_id,
+                "_progress_line": progress_line,
+                "_resume_provider_session_id": session.provider_session_id,
+                "_cancel_event": cancel_event,
+            }
+            stamp_logical_deadline(task_metadata, float(effective_timeout))
             task = TaskSpec(
                 objective=message,
                 role=session.role,
@@ -789,12 +799,7 @@ class AgentService:
                 timeout_seconds=effective_timeout,
                 isolate_write=False,
                 budget=budget,
-                metadata={
-                    "_agent_session_id": session_id,
-                    "_progress_line": progress_line,
-                    "_resume_provider_session_id": session.provider_session_id,
-                    "_cancel_event": cancel_event,
-                },
+                metadata=task_metadata,
             )
             try:
                 result = self.registry.continue_provider_session(

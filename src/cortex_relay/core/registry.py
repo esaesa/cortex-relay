@@ -10,6 +10,7 @@ from typing import Any
 from pathlib import Path
 from datetime import datetime, timezone
 
+from cortex_relay.core.agents import AgentEvent
 from cortex_relay.core.models import TaskResult, TaskSpec
 from cortex_relay.runtime.agent_backend import AgentStoreBackend
 from cortex_relay.runtime.agent_store import AgentStore
@@ -23,6 +24,12 @@ from cortex_relay.providers.opencode import OpenCodeAdapter
 from cortex_relay.observability import RunStore, summarize_usage
 from cortex_relay.runtime.artifacts import ArtifactStore
 from cortex_relay.runtime.progress import normalize_progress
+from cortex_relay.runtime.recovery import (
+    RecoveryDecision,
+    recovery_decision,
+    remaining_runtime_seconds,
+    stamp_logical_deadline,
+)
 from cortex_relay.runtime.supervision import SupervisionTracker
 from cortex_relay.runtime.worktree import WorktreeManager
 
@@ -200,29 +207,7 @@ class ProviderRegistry:
         provider: ProviderAdapter,
         task: TaskSpec,
     ) -> TaskResult:
-        started = time.monotonic()
-        try:
-            result = provider.execute_session(task)
-        except Exception:
-            synthetic = TaskResult(
-                status="error",
-                provider=provider.name,
-                model=task.model,
-                summary="Provider session raised before returning a normalized result.",
-                termination_reason="provider_exception",
-            )
-            self._record_provider_health(
-                provider.name,
-                synthetic,
-                time.monotonic() - started,
-            )
-            raise
-        self._record_provider_health(
-            provider.name,
-            result,
-            time.monotonic() - started,
-        )
-        return result
+        return self._run_provider_turns(provider, task)
 
     def continue_provider_session(
         self,
@@ -231,29 +216,189 @@ class ProviderRegistry:
         provider_session_id: str,
     ) -> TaskResult:
         """Continue a durable provider session while feeding runtime health."""
-        started = time.monotonic()
-        try:
-            result = provider.continue_session(task, provider_session_id)
-        except Exception:
-            synthetic = TaskResult(
-                status="error",
-                provider=provider.name,
-                model=task.model,
-                summary="Provider continuation raised before returning a normalized result.",
-                termination_reason="provider_exception",
-            )
+        return self._run_provider_turns(
+            provider, task, provider_session_id=provider_session_id
+        )
+
+    def _run_provider_turns(
+        self,
+        provider: ProviderAdapter,
+        task: TaskSpec,
+        *,
+        provider_session_id: str | None = None,
+    ) -> TaskResult:
+        """Run provider turns, resuming an interrupted session while budget allows.
+
+        Every attempt feeds provider health, and a print-timeout interruption may
+        be resumed on the *same* provider session until the recovery policy or the
+        cumulative logical deadline says no.
+        """
+        current = task
+        session_id = provider_session_id
+        recovered = 0
+        while True:
+            started = time.monotonic()
+            try:
+                result = (
+                    provider.execute_session(current)
+                    if session_id is None
+                    else provider.continue_session(current, session_id)
+                )
+            except Exception:
+                synthetic = TaskResult(
+                    status="error",
+                    provider=provider.name,
+                    model=current.model,
+                    summary=(
+                        "Provider session raised before returning a normalized result."
+                        if provider_session_id is None
+                        else "Provider continuation raised before returning a normalized result."
+                    ),
+                    termination_reason="provider_exception",
+                )
+                self._record_provider_health(
+                    provider.name,
+                    synthetic,
+                    time.monotonic() - started,
+                )
+                raise
             self._record_provider_health(
                 provider.name,
-                synthetic,
+                result,
                 time.monotonic() - started,
             )
-            raise
-        self._record_provider_health(
-            provider.name,
-            result,
-            time.monotonic() - started,
-        )
-        return result
+
+            decision = recovery_decision(
+                current,
+                result,
+                provider_capabilities=provider.capabilities(),
+                remaining_runtime_seconds=remaining_runtime_seconds(current),
+            )
+            if not decision.resume:
+                break
+            candidate = (
+                result.conversation_id
+                or session_id
+                or self._bound_provider_session_id(current)
+            )
+            if not candidate:
+                self._note_recovery(
+                    current,
+                    provider,
+                    RecoveryDecision(
+                        resume=False,
+                        reason="missing_provider_session_id",
+                        attempt=decision.attempt,
+                        next_attempt=decision.attempt,
+                        prompt=None,
+                        remaining_runtime_seconds=decision.remaining_runtime_seconds,
+                    ),
+                    resuming=False,
+                )
+                break
+
+            self._note_recovery(current, provider, decision, resuming=True)
+            recovered = decision.next_attempt
+            session_id = candidate
+            current = replace(
+                current,
+                objective=decision.prompt or current.objective,
+                timeout_seconds=max(
+                    1, min(int(current.timeout_seconds), int(decision.remaining_runtime_seconds))
+                ),
+                metadata={**current.metadata, "_recovery_attempt": decision.next_attempt},
+            )
+
+        if recovered:
+            self._finish_recovery(current, recovered)
+        if not recovered:
+            return result
+        metadata = dict(result.metadata or {})
+        metadata.update({"recovery_attempts": recovered, "recovered": True})
+        return replace(result, metadata=metadata)
+
+    def _bound_provider_session_id(self, task: TaskSpec) -> str | None:
+        agent_session_id = task.metadata.get("_agent_session_id")
+        if not isinstance(agent_session_id, str) or not agent_session_id:
+            return None
+        try:
+            bound = self.agent_store.get(agent_session_id).provider_session_id
+        except (OSError, ValueError):
+            return None
+        return bound or None
+
+    def _note_recovery(
+        self,
+        task: TaskSpec,
+        provider: ProviderAdapter,
+        decision: RecoveryDecision,
+        *,
+        resuming: bool,
+    ) -> None:
+        payload = {**decision.to_dict(), "resuming": resuming, "provider": provider.name}
+        source_workspace = task.metadata.get("_observability_workspace")
+        task_id = task.metadata.get("_task_id")
+        if isinstance(source_workspace, str) and isinstance(task_id, str):
+            try:
+                self.run_store.record_recovery_event(
+                    Path(source_workspace),
+                    task_id,
+                    attempt=decision.next_attempt,
+                    reason=decision.reason,
+                    resume=resuming,
+                )
+            except (OSError, ValueError) as exc:
+                logger.warning(
+                    "failed to record provider recovery for %s: %s", task_id, exc
+                )
+
+        agent_session_id = task.metadata.get("_agent_session_id")
+        if not isinstance(agent_session_id, str) or not agent_session_id:
+            return
+        try:
+            self.record_agent_event(
+                provider.name,
+                AgentEvent(
+                    session_id=agent_session_id,
+                    kind="recovery",
+                    data=payload,
+                ),
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "failed to persist recovery event for %s: %s", agent_session_id, exc
+            )
+        if resuming:
+            try:
+                self.agent_store.merge_metadata(
+                    agent_session_id,
+                    {
+                        "recovery_active": True,
+                        "recovery_attempt": decision.next_attempt,
+                    },
+                )
+            except (OSError, ValueError) as exc:
+                logger.warning(
+                    "failed to mark recovery on agent session %s: %s",
+                    agent_session_id,
+                    exc,
+                )
+
+    def _finish_recovery(self, task: TaskSpec, attempts: int) -> None:
+        agent_session_id = task.metadata.get("_agent_session_id")
+        if not isinstance(agent_session_id, str) or not agent_session_id:
+            return
+        try:
+            self.agent_store.merge_metadata(
+                agent_session_id,
+                {"recovery_active": False, "recovery_attempts": attempts},
+            )
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "failed to clear recovery state on agent session %s: %s",
+                agent_session_id,
+                exc,
+            )
 
     def profile_config(
         self,
@@ -366,6 +511,7 @@ class ProviderRegistry:
         metadata = dict(task.metadata)
         metadata["_task_id"] = task_id
         metadata["_observability_workspace"] = str(source_workspace)
+        stamp_logical_deadline(metadata, task.timeout_seconds)
         external_progress = metadata.get("_external_progress")
         cancel_event = metadata.get("_cancel_event")
         if cancel_event is None:
@@ -847,6 +993,10 @@ class ProviderRegistry:
         )
 
     def _start_direct_agent_provider(self, task: TaskSpec) -> TaskResult:
+        task = replace(
+            task,
+            metadata=stamp_logical_deadline(dict(task.metadata), task.timeout_seconds),
+        )
         try:
             provider = self.resolve(task)
         except KeyError as exc:

@@ -703,6 +703,43 @@ class RunStore:
         record.update(provider_pid=pid, process_alive=alive, last_heartbeat_at=_utc_now())
         self._write_record(path, record)
 
+    @_task_locked(required=False)
+    def record_recovery_event(
+        self,
+        workspace: Path,
+        task_id: str,
+        *,
+        attempt: int,
+        reason: str,
+        resume: bool,
+    ) -> None:
+        """Append one bounded provider-recovery decision to the task event log."""
+        path = self._task_path(workspace, task_id)
+        record = self._read_record(path)
+        if not record or record.get("task_id") != task_id:
+            raise ValueError(f"task record is missing or mismatched: {task_id}")
+        now = _utc_now()
+        sequence = int(record.get("progress_sequence") or 0) + 1
+        self._append_event(
+            workspace,
+            task_id,
+            {
+                "sequence": sequence,
+                "kind": "recovery",
+                "at": now,
+                "recovery_attempt": attempt,
+                "reason": reason,
+                "resume": resume,
+            },
+        )
+        record.update(
+            progress_sequence=sequence,
+            last_event_at=now,
+            recovery_attempts=max(attempt, int(record.get("recovery_attempts") or 0)),
+            updated_at=now,
+        )
+        self._write_record(path, record, required=False)
+
     def list_events(
         self, workspace: Path, task_id: str, *, after_sequence: int = 0, limit: int = 20
     ) -> dict[str, Any]:

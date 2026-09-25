@@ -1,11 +1,15 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 from cortex_relay.core.models import TaskSpec
-from cortex_relay.providers.antigravity import AntigravityAdapter
+from cortex_relay.providers.antigravity import (
+    AntigravityAdapter,
+    _provider_timeout_seconds,
+)
 from cortex_relay.runtime.process import ProcessResult
 
 
@@ -143,6 +147,49 @@ class AntigravityTests(unittest.TestCase):
 
         self.assertEqual(result.status, "timeout")
         self.assertIn("print timeout", result.error)
+        self.assertEqual(result.termination_reason, "provider_print_timeout")
+
+    def test_print_timeout_reserves_runtime_for_recovery(self):
+        adapter = AntigravityAdapter()
+        with tempfile.TemporaryDirectory() as tmp:
+            task = TaskSpec(
+                objective="List files",
+                workspace=Path(tmp),
+                timeout_seconds=300,
+            )
+            command = adapter.command_for(task)
+            self.assertEqual(command[command.index("--print-timeout") + 1], "240s")
+
+            resumed = replace(
+                task,
+                metadata={**task.metadata, "_recovery_attempt": 1},
+            )
+            resumed_command = adapter.command_for(resumed)
+            self.assertEqual(
+                resumed_command[resumed_command.index("--print-timeout") + 1],
+                "295s",
+            )
+
+    def test_provider_timeout_never_reaches_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = TaskSpec(
+                objective="List files",
+                workspace=Path(tmp),
+                timeout_seconds=1,
+            )
+            self.assertEqual(_provider_timeout_seconds(task), 1)
+
+            resumed = replace(
+                task,
+                metadata={**task.metadata, "_recovery_attempt": 2},
+            )
+            self.assertEqual(_provider_timeout_seconds(resumed), 1)
+
+            explicit = replace(
+                task,
+                metadata={**task.metadata, "_provider_timeout_seconds": 42},
+            )
+            self.assertEqual(_provider_timeout_seconds(explicit), 1)
 
     @patch("cortex_relay.providers.antigravity.shutil.which", return_value=None)
     def test_missing_binary_returns_unavailable(self, _which):
