@@ -413,8 +413,7 @@ class AgentService:
         if kind in {"text_delta", "message"}:
             text = data.get("text")
             if isinstance(text, str) and text.strip():
-                compact = " ".join(text.strip().split())
-                return compact[:500]
+                return " ".join(text.strip().split())[:1000]
             return None
         if kind == "tool":
             name = data.get("name") or data.get("item_type") or "tool"
@@ -424,14 +423,42 @@ class AgentService:
         if kind == "child_update":
             role = data.get("role") or "subagent"
             state = data.get("state") or "running"
-            return f"Child {role}: {state}"
+            provider_id = data.get("provider_session_id")
+            suffix = f" [{provider_id}]" if provider_id else ""
+            return f"Child {role}: {state}{suffix}"
+        if kind == "child_spawned":
+            role = data.get("role") or "subagent"
+            child_id = data.get("child_session_id")
+            provider_id = data.get("provider_session_id")
+            identity = child_id or provider_id
+            suffix = f" [{identity}]" if identity else ""
+            return f"Spawned child {role}{suffix}"
         if kind == "diagnostic":
             error = data.get("error")
             text = data.get("text")
             detail = error if error is not None else text
-            return f"Diagnostic: {detail}"[:500] if detail else None
+            return f"Diagnostic: {detail}"[:1000] if detail else None
         if kind == "provider_session":
-            return "Provider session established"
+            provider_id = data.get("provider_session_id")
+            return (
+                f"Provider session established [{provider_id}]"
+                if provider_id
+                else "Provider session established"
+            )
+        if kind == "provider_event":
+            event_name = data.get("type") or data.get("event")
+            detail = data.get("detail") or data.get("message")
+            if detail:
+                return f"Provider event {event_name or ''}: {detail}"[:1000]
+            if event_name:
+                return f"Provider event: {event_name}"
+            return "Provider event"
+        if kind == "untracked_child":
+            tool = data.get("tool") or "native subagent tool"
+            return (
+                f"Untracked native child activity via {tool}; provider did not expose "
+                "a child session identifier"
+            )
         return None
 
     def watch(
