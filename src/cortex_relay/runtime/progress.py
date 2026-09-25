@@ -8,6 +8,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from cortex_relay.core.agents import AgentEvent
+
 
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _SECRET = re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|authorization|password|secret)\b(\s*[:=]\s*)(\S+)")
@@ -52,6 +54,329 @@ def runner_progress_kwargs(task: Any, provider: str) -> dict[str, Callable[..., 
     if callable(heartbeat):
         callbacks["on_heartbeat"] = heartbeat
     return callbacks
+
+
+def normalize_agent_events(
+    provider: str,
+    line: str,
+    session_id: str,
+    stream: str = "stdout",
+) -> tuple[AgentEvent, ...]:
+    """Translate provider-native output into durable semantic agent events.
+
+    Unlike ProgressEvent, this stream preserves response text deltas and native
+    child-agent handles. It intentionally excludes hidden reasoning internals.
+    """
+
+    if stream == "stderr":
+        preview = _preview(line, 2000)
+        if not preview:
+            return ()
+        return (
+            AgentEvent(
+                session_id=session_id,
+                kind="diagnostic",
+                data={"stream": "stderr", "text": preview},
+                provider_event="stderr",
+            ),
+        )
+
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(event, dict):
+        return ()
+
+    if provider == "antigravity":
+        return _antigravity_agent_events(event, session_id)
+    if provider == "codex":
+        return _codex_agent_events(event, session_id)
+    if provider == "opencode":
+        return _opencode_agent_events(event, session_id)
+    return ()
+
+
+def _antigravity_agent_events(
+    event: dict[str, Any], session_id: str
+) -> tuple[AgentEvent, ...]:
+    kind = event.get("event")
+    if kind == "init":
+        return (
+            AgentEvent(
+                session_id=session_id,
+                kind="provider_started",
+                data={},
+                provider_event="init",
+            ),
+        )
+    if kind == "result":
+        result = _dict(event.get("result"))
+        return (
+            AgentEvent(
+                session_id=session_id,
+                kind="provider_result",
+                data={
+                    "status": result.get("status"),
+                    "conversation_id": result.get("conversation_id"),
+                    "duration_seconds": result.get("duration_seconds"),
+                    "usage": result.get("usage") if isinstance(result.get("usage"), dict) else {},
+                },
+                provider_event="result",
+            ),
+        )
+    if kind != "step_update":
+        return ()
+
+    step = _dict(event.get("step_update"))
+    step_type = step.get("step_type")
+    step_index = _integer(step.get("step_index"))
+    events: list[AgentEvent] = []
+
+    if step_type == "agent_response":
+        text = (
+            step.get("text_delta")
+            or step.get("delta")
+            or step.get("text")
+            or step.get("response")
+        )
+        if isinstance(text, str) and text:
+            events.append(
+                AgentEvent(
+                    session_id=session_id,
+                    kind="response_delta",
+                    data={"text": text, "step_index": step_index},
+                    provider_event="step_update",
+                )
+            )
+
+    subagent_info = _dict(step.get("subagent_info"))
+    raw_agents = subagent_info.get("subagents")
+    if isinstance(raw_agents, list) and raw_agents:
+        agents: list[dict[str, Any]] = []
+        for agent in raw_agents:
+            if not isinstance(agent, dict):
+                continue
+            agents.append(
+                {
+                    "provider_session_id": _text(
+                        agent.get("conversation_id") or agent.get("session_id")
+                    ),
+                    "role": _text(agent.get("role")),
+                    "type": _text(agent.get("type_name") or agent.get("type")),
+                    "state": _text(agent.get("state") or agent.get("status")),
+                    "log_uri": _text(agent.get("log_uri")),
+                    "workspace_uris": (
+                        agent.get("workspace_uris")
+                        if isinstance(agent.get("workspace_uris"), list)
+                        else []
+                    ),
+                }
+            )
+        if agents:
+            events.append(
+                AgentEvent(
+                    session_id=session_id,
+                    kind="child_snapshot",
+                    data={"children": agents, "step_index": step_index},
+                    provider_event="step_update",
+                )
+            )
+
+    if step_type == "tool":
+        info = _dict(step.get("tool_info"))
+        params = _dict(info.get("parameters"))
+        events.append(
+            AgentEvent(
+                session_id=session_id,
+                kind="tool",
+                data={
+                    "name": step.get("tool_name") or info.get("name"),
+                    "state": step.get("state"),
+                    "parameters": params,
+                    "output": _message(info.get("output")),
+                    "error": _message(info.get("error")),
+                    "step_index": step_index,
+                },
+                provider_event="step_update",
+            )
+        )
+    return tuple(events)
+
+
+def _codex_agent_events(
+    event: dict[str, Any], session_id: str
+) -> tuple[AgentEvent, ...]:
+    kind = _text(event.get("type"))
+    if kind == "thread.started":
+        return (
+            AgentEvent(
+                session_id=session_id,
+                kind="provider_session",
+                data={"provider_session_id": _text(event.get("thread_id"))},
+                provider_event=kind,
+            ),
+        )
+    if kind in {"turn.started", "turn.completed", "turn.failed"}:
+        return (
+            AgentEvent(
+                session_id=session_id,
+                kind="turn",
+                data={
+                    "state": kind.split(".", 1)[1] if "." in kind else kind,
+                    "usage": event.get("usage") if isinstance(event.get("usage"), dict) else {},
+                },
+                provider_event=kind,
+            ),
+        )
+    if kind not in {"item.started", "item.updated", "item.completed"}:
+        return ()
+
+    item = _dict(event.get("item"))
+    item_type = _text(item.get("type"))
+    if item_type in {"agent_message", "agentMessage"}:
+        text = item.get("text") or item.get("delta")
+        if isinstance(text, str) and text:
+            return (
+                AgentEvent(
+                    session_id=session_id,
+                    kind="response_delta",
+                    data={"text": text, "item_id": item.get("id")},
+                    provider_event=kind,
+                ),
+            )
+
+    if item_type == "collab_tool_call":
+        states = _dict(item.get("agents_states"))
+        children = [
+            {
+                "provider_session_id": _text(child_id),
+                "state": _text(state),
+                "role": None,
+                "type": "codex-subagent",
+            }
+            for child_id, state in states.items()
+            if _text(child_id)
+        ]
+        return (
+            AgentEvent(
+                session_id=session_id,
+                kind="child_snapshot",
+                data={"children": children},
+                provider_event=kind,
+            ),
+        ) if children else ()
+
+    if item_type in {
+        "command_execution",
+        "file_change",
+        "mcp_tool_call",
+        "web_search",
+    }:
+        return (
+            AgentEvent(
+                session_id=session_id,
+                kind="tool",
+                data={
+                    "type": item_type,
+                    "status": item.get("status"),
+                    "command": item.get("command"),
+                    "changes": item.get("changes"),
+                    "output": item.get("aggregated_output"),
+                    "error": _dict(item.get("error")).get("message"),
+                },
+                provider_event=kind,
+            ),
+        )
+    return ()
+
+
+def _opencode_agent_events(
+    event: dict[str, Any], session_id: str
+) -> tuple[AgentEvent, ...]:
+    kind = _text(event.get("type"))
+    part = _dict(event.get("part"))
+
+    provider_session_id = _text(
+        event.get("sessionID") or part.get("sessionID") or part.get("sessionId")
+    )
+    events: list[AgentEvent] = []
+    if provider_session_id:
+        events.append(
+            AgentEvent(
+                session_id=session_id,
+                kind="provider_session",
+                data={"provider_session_id": provider_session_id},
+                provider_event=kind,
+            )
+        )
+
+    if kind == "text" or part.get("type") == "text":
+        text = part.get("text") or event.get("text")
+        if isinstance(text, str) and text:
+            events.append(
+                AgentEvent(
+                    session_id=session_id,
+                    kind="response_delta",
+                    data={"text": text},
+                    provider_event=kind,
+                )
+            )
+
+    if part.get("type") == "tool":
+        state = _dict(part.get("state"))
+        tool = _text(part.get("tool"))
+        metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+        child_id = _text(
+            metadata.get("sessionID")
+            or metadata.get("sessionId")
+            or metadata.get("childSessionID")
+            or metadata.get("childSessionId")
+        )
+        if tool in {"task", "Task"} and child_id:
+            events.append(
+                AgentEvent(
+                    session_id=session_id,
+                    kind="child_snapshot",
+                    data={
+                        "children": [
+                            {
+                                "provider_session_id": child_id,
+                                "state": state.get("status"),
+                                "role": _text(_dict(state.get("input")).get("subagent_type")),
+                                "type": "opencode-subagent",
+                            }
+                        ]
+                    },
+                    provider_event=kind,
+                )
+            )
+        events.append(
+            AgentEvent(
+                session_id=session_id,
+                kind="tool",
+                data={
+                    "name": tool,
+                    "status": state.get("status"),
+                    "input": state.get("input"),
+                    "output": state.get("output"),
+                    "error": state.get("error"),
+                    "metadata": metadata,
+                },
+                provider_event=kind,
+            )
+        )
+
+    if kind in {"step_start", "step_finish"}:
+        events.append(
+            AgentEvent(
+                session_id=session_id,
+                kind="turn",
+                data={"state": "started" if kind == "step_start" else "completed"},
+                provider_event=kind,
+            )
+        )
+    return tuple(events)
 
 
 def normalize_progress(provider: str, line: str, task_id: str, stream: str = "stdout") -> ProgressEvent | None:
@@ -383,3 +708,10 @@ def _codex_agents(item: dict[str, Any]) -> tuple[dict[str, Any], ...]:
         if agent_id:
             return ({"conversation_id": agent_id, "state": "running"},)
     return ()
+
+
+def _text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
