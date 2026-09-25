@@ -58,6 +58,23 @@ class AntigravityTests(unittest.TestCase):
         self.assertIn("claude-sonnet-4-6", command)
 
 
+    def test_continue_session_adds_conversation_handle(self):
+        adapter = AntigravityAdapter()
+        with tempfile.TemporaryDirectory() as tmp:
+            task = TaskSpec(
+                objective="Continue review",
+                workspace=Path(tmp),
+                reasoning="medium",
+                model="gemini-3.8-flash-high",
+                metadata={"_resume_provider_session_id": "conv-existing"},
+            )
+            command = adapter.command_for(task)
+        self.assertIn("--conversation", command)
+        self.assertEqual(
+            command[command.index("--conversation") + 1],
+            "conv-existing",
+        )
+
     @patch("cortex_relay.providers.antigravity.shutil.which", return_value="/usr/bin/agy")
     def test_successful_envelope_is_normalized(self, _which):
         envelope = {
