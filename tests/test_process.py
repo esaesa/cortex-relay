@@ -1,8 +1,10 @@
+import gc
 import os
 import sys
 import tempfile
 import threading
 import unittest
+import warnings
 
 from pathlib import Path
 
@@ -28,6 +30,25 @@ class ProcessRunnerTests(unittest.TestCase):
                 )
         finally:
             timer.cancel()
+
+    def test_process_closes_pipe_wrappers(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            result = ProcessRunner().run(
+                [sys.executable, "-c", "print('closed')"],
+                cwd=Path.cwd(),
+                timeout_seconds=5,
+            )
+            self.assertEqual(result.stdout.strip(), "closed")
+            gc.collect()
+
+        leaked = [
+            warning
+            for warning in caught
+            if issubclass(warning.category, ResourceWarning)
+            and "unclosed file" in str(warning.message).lower()
+        ]
+        self.assertEqual(leaked, [])
 
     def test_process_returns_output(self):
         result = ProcessRunner().run(
