@@ -34,7 +34,32 @@ jobs:
         run: python -m pip install -e .
 
       - name: Run unit tests
-        run: python -m unittest discover -s tests -v
+        shell: bash
+        env:
+          PYTHONFAULTHANDLER: "1"
+        run: |
+          set +e
+          python -m unittest discover -s tests -v >unit-tests.log 2>&1
+          status=$?
+          echo "unit tests exit code: ${status}"
+          if [ "${status}" -eq 0 ]; then
+            tail -n 3 unit-tests.log
+          else
+            summary=$(grep -E '^(Ran |FAILED|OK)' unit-tests.log | tr '\n' ' ')
+            echo "::error title=unit tests exited ${status}::${summary:-no unittest summary line found}"
+            grep -E '^(FAIL|ERROR):' unit-tests.log | head -n 4 | while IFS= read -r line; do
+              echo "::error title=unit test failure::${line}"
+            done
+            tail_msg=$(tail -n 25 unit-tests.log | tr '\n' ' ' | cut -c1-3000)
+            echo "::error title=unit tests output tail::${tail_msg:-log is empty}"
+            {
+              echo "### unit tests failed (exit ${status})"
+              echo '```'
+              head -n 80 unit-tests.log
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          exit ${status}
 
       - name: Smoke-test CLI
         run: cortex-relay --help
