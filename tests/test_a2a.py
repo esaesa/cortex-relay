@@ -3,7 +3,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from cortex_relay.core.models import TaskResult
+from cortex_relay.core.models import TaskBudget, TaskResult
 from cortex_relay.transports.a2a import (
     A2AServerPolicy,
     a2a_available,
@@ -55,6 +55,24 @@ class A2APolicyTests(unittest.TestCase):
         self.assertEqual(task.access, "read_only")
         self.assertIs(task.metadata["_cancel_event"], cancel_event)
         self.assertNotIn("_cancel_event", task.to_dict()["metadata"])
+
+    def test_policy_carries_supervision_budget_into_task(self):
+        policy = A2AServerPolicy(
+            provider="codex",
+            budget=TaskBudget(
+                max_tool_calls=8,
+                max_repeated_calls=2,
+                max_idle_seconds=30,
+                max_runtime_seconds=120,
+                max_child_agents=3,
+            ),
+        )
+        task = policy.task_spec_for("Review")
+        self.assertEqual(task.budget.max_tool_calls, 8)
+        self.assertEqual(task.budget.max_repeated_calls, 2)
+        self.assertEqual(task.budget.max_idle_seconds, 30)
+        self.assertEqual(task.budget.max_runtime_seconds, 120)
+        self.assertEqual(task.budget.max_child_agents, 3)
 
     def test_policy_carries_transport_progress_callback(self):
         policy = A2AServerPolicy(provider="codex")
