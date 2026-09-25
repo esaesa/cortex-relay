@@ -33,6 +33,30 @@ def configuration_checks(*, provider: str, scope: str, project_dir: Path) -> lis
 
 def runtime_checks(registry: ProviderRegistry) -> list[DiagnosticCheck]:
     checks: list[DiagnosticCheck] = []
+    try:
+        health = registry.agent_store.health()
+        integrity = health.get("integrity") or []
+        checks.append(
+            DiagnosticCheck(
+                name="state:agent-store",
+                ok=bool(health.get("ok")),
+                detail=(
+                    f"schema={health.get('schema_version')}/"
+                    f"{health.get('expected_schema_version')} "
+                    f"integrity={','.join(str(item) for item in integrity)} "
+                    f"path={health.get('db_path')}"
+                ),
+            )
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        checks.append(
+            DiagnosticCheck(
+                name="state:agent-store",
+                ok=False,
+                detail=str(exc),
+            )
+        )
+
     for item in registry.capabilities():
         checks.append(
             DiagnosticCheck(
