@@ -1136,6 +1136,9 @@ def _agent_event_summary(event: dict[str, Any]) -> str | None:
         role = data.get("role") or "subagent"
         state = data.get("state") or "running"
         return f"child {role}: {state}"
+    if kind == "child_spawned":
+        role = data.get("role") or "subagent"
+        return f"spawned child {role}"
     if kind == "diagnostic":
         detail = data.get("error") or data.get("text")
         return f"diagnostic: {detail}"[:120] if detail else "diagnostic"
