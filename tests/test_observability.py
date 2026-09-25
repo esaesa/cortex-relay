@@ -54,6 +54,7 @@ class ObservabilityTests(unittest.TestCase):
                     provider="opencode",
                     model="opencode/gpt-6-luna",
                     summary="Implemented.",
+                    final_text="Implemented the authentication fix in full detail.\nSecond line.",
                     changed_files=("auth.py",),
                     tests=("18 passed",),
                     duration_seconds=12.5,
@@ -74,6 +75,21 @@ class ObservabilityTests(unittest.TestCase):
             self.assertEqual(record["usage_summary"]["cost"], 0.004)
             self.assertEqual(record["changed_files"], ["auth.py"])
             self.assertEqual(record["tests"], ["18 passed"])
+            self.assertEqual(record["output_chars"], len("Implemented the authentication fix in full detail.\nSecond line."))
+            output = store.get_output(workspace, task_id, offset=0, max_chars=20)
+            self.assertEqual(output["text"], "Implemented the aut")
+            self.assertFalse(output["complete"])
+            remainder = store.get_output(
+                workspace,
+                task_id,
+                offset=output["next_offset"],
+                max_chars=200,
+            )
+            self.assertTrue(remainder["complete"])
+            self.assertEqual(
+                output["text"] + remainder["text"],
+                "Implemented the authentication fix in full detail.\nSecond line.",
+            )
 
             snapshot = store.snapshot(workspace)
             self.assertEqual(snapshot["summary"]["success"], 1)
@@ -210,8 +226,21 @@ class ObservabilityTests(unittest.TestCase):
             active_id = store.start_task(TaskSpec(objective="Active", workspace=workspace))
             store.update_task(workspace, active_id, status="running")
 
+            output_path = Path(store.complete_task(
+                workspace,
+                done_id,
+                TaskResult(
+                    status="success",
+                    provider="fake",
+                    summary="Done",
+                    final_text="full",
+                ),
+            )["output_path"])
+            self.assertTrue(output_path.exists())
+
             removed = store.clear_completed(workspace)
             self.assertEqual(removed, 1)
+            self.assertFalse(output_path.exists())
             tasks = store.list_tasks(workspace)
             self.assertEqual(len(tasks), 1)
             self.assertEqual(tasks[0]["task_id"], active_id)
