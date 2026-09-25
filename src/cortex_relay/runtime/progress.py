@@ -360,6 +360,24 @@ def _codex_agents(item: dict[str, Any]) -> tuple[dict[str, Any], ...]:
             for key, value in list(states.items())[:8]
         )
     item_type = str(item.get("type") or "")
+    if item_type in {"collab_tool_call", "collabAgentToolCall"}:
+        receivers = item.get("receiverThreadIds") or item.get("receiver_thread_ids")
+        if isinstance(receivers, list):
+            return tuple(
+                {"conversation_id": _preview(value, 80), "state": "running"}
+                for value in receivers[:8]
+                if isinstance(value, str) and value.strip()
+            )
+    if item_type in {"subAgentActivity", "sub_agent_activity"}:
+        agent_id = _preview(item.get("agentThreadId") or item.get("agent_thread_id"), 80)
+        kind = str(item.get("kind") or "")
+        if agent_id:
+            return ({
+                "conversation_id": agent_id,
+                "state": "done" if kind == "completed" else (
+                    "error" if kind == "interrupted" else "running"
+                ),
+            },)
     if item_type in {"create_subagent_call", "createSubagentCall"}:
         agent_id = _preview(item.get("agent_id") or item.get("agentId"), 80)
         if agent_id:
