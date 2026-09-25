@@ -1,4 +1,4 @@
-"""Bounded observable progress; model response deltas are never persisted."""
+"""Bounded dashboard progress derived from the richer durable agent event stream."""
 
 from __future__ import annotations
 
@@ -96,7 +96,18 @@ def _antigravity(event: dict[str, Any], task_id: str) -> ProgressEvent | None:
     step = _dict(event.get("step_update"))
     index = _integer(step.get("step_index"))
     if step.get("step_type") == "agent_response":
-        return ProgressEvent(task_id, "response", "active", "Preparing response", provider_event="step_update", step_index=index)
+        delta = step.get("text_delta")
+        if not isinstance(delta, str):
+            delta = step.get("text")
+        return ProgressEvent(
+            task_id,
+            "response",
+            "active",
+            "Agent response",
+            provider_event="step_update",
+            step_index=index,
+            output_preview=_preview(delta),
+        )
     agents = _subagents(step.get("subagent_info"))
     if agents and not step.get("tool_info"):
         state = "done" if step.get("state") == "DONE" else "active"
@@ -128,6 +139,74 @@ def _antigravity(event: dict[str, Any], task_id: str) -> ProgressEvent | None:
 
 
 def _codex(event: dict[str, Any], task_id: str) -> ProgressEvent | None:
+    method = event.get("method")
+    if isinstance(method, str):
+        params = _dict(event.get("params"))
+        if method in {"turn/started", "turn/completed"}:
+            turn = _dict(params.get("turn"))
+            state = "active" if method == "turn/started" else "done"
+            return ProgressEvent(
+                task_id,
+                "turn",
+                state,
+                method.replace("/", " "),
+                provider_event=method,
+                **_usage(turn.get("usage")),
+            )
+        if method == "item/agentMessage/delta":
+            return ProgressEvent(
+                task_id,
+                "response",
+                "active",
+                "Agent response",
+                provider_event=method,
+                output_preview=_preview(params.get("delta")),
+            )
+        if method in {"item/started", "item/completed"}:
+            item = _dict(params.get("item"))
+            item_type = str(item.get("type") or "")
+            if item_type == "agentMessage":
+                return ProgressEvent(
+                    task_id,
+                    "response",
+                    "done" if method == "item/completed" else "active",
+                    "Agent message",
+                    provider_event=method,
+                    output_preview=_preview(item.get("text")),
+                )
+            state = "done" if method == "item/completed" else "active"
+            files = ()
+            path = None
+            if item_type == "fileChange":
+                changes = item.get("changes")
+                files = tuple(
+                    p for change in (changes if isinstance(changes, list) else [])[:12]
+                    if isinstance(change, dict)
+                    for p in [_preview(change.get("path"), 180)] if p
+                )
+                path = files[0] if files else None
+            return ProgressEvent(
+                task_id,
+                "tool",
+                state,
+                f"{item_type or 'item'} {state}",
+                tool=item_type or None,
+                path=path,
+                files=files,
+                provider_event=method,
+                subagents=_codex_agents(item),
+            )
+        if method == "error":
+            return ProgressEvent(
+                task_id,
+                "diagnostic",
+                "error",
+                "Codex error",
+                provider_event=method,
+                error_preview=_preview(_message(params.get("error") or params)),
+            )
+        return None
+
     kind = event.get("type")
     if kind in {"turn.started", "turn.completed", "turn.failed"}:
         state = "active" if kind == "turn.started" else ("error" if kind == "turn.failed" else "done")
@@ -178,6 +257,15 @@ def _opencode(event: dict[str, Any], task_id: str) -> ProgressEvent | None:
         error = event.get("error")
         message = _dict(error).get("message") if isinstance(error, dict) else error
         return ProgressEvent(task_id, "diagnostic", "error", "OpenCode error", provider_event="error", error_preview=_preview(message))
+    if kind == "text":
+        return ProgressEvent(
+            task_id,
+            "response",
+            "active",
+            "Agent response",
+            provider_event=str(kind),
+            output_preview=_preview(part.get("text")),
+        )
     if part.get("type") != "tool":
         return None
     tool = _preview(part.get("tool"), 80)
@@ -257,14 +345,23 @@ def _subagents(value: Any) -> tuple[dict[str, Any], ...]:
             "type": _preview(agent.get("type_name"), 80),
             "state": _preview(agent.get("state") or agent.get("status"), 40),
             "conversation_id": _preview(agent.get("conversation_id"), 80),
+            "log_uri": _preview(agent.get("log_uri"), 180),
+            "workspace_uris": agent.get("workspace_uris"),
         }
         for agent in agents[:8] if isinstance(agent, dict)
     )
 
 
 def _codex_agents(item: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-    states = _dict(item.get("agents_states"))
-    return tuple(
-        {"conversation_id": _preview(key, 80), "state": _preview(str(value), 40)}
-        for key, value in list(states.items())[:8]
-    )
+    states = _dict(item.get("agents_states") or item.get("agentsStates"))
+    if states:
+        return tuple(
+            {"conversation_id": _preview(key, 80), "state": _preview(str(value), 40)}
+            for key, value in list(states.items())[:8]
+        )
+    item_type = str(item.get("type") or "")
+    if item_type in {"create_subagent_call", "createSubagentCall"}:
+        agent_id = _preview(item.get("agent_id") or item.get("agentId"), 80)
+        if agent_id:
+            return ({"conversation_id": agent_id, "state": "running"},)
+    return ()
