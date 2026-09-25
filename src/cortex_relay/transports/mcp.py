@@ -22,6 +22,10 @@ def create_server(
 
     try:
         from mcp.server.mcpserver import Context, MCPServer
+        # This module uses postponed annotations. Expose Context in module globals
+        # only after the optional MCP dependency is successfully imported so MCP's
+        # runtime type-hint inspection can inject it into agent_watch.
+        globals()["Context"] = Context
     except ImportError as exc:  # pragma: no cover - depends on optional extra
         raise RuntimeError(
             'MCP support is not installed. Install with: pip install "cortex-relay[mcp]"'
