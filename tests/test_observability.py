@@ -188,7 +188,7 @@ class ObservabilityTests(unittest.TestCase):
                 item for item in snapshot["agents"]
                 if item["session_id"] == parent.session_id
             )
-            self.assertEqual(parent_row["current_activity"], "powershell (running)")
+            self.assertEqual(parent_row["current_activity"], "spawned child explorer")
             self.assertTrue(parent_row["recent_events"])
 
     def test_dashboard_renders_agents_even_when_no_workflow_tasks_exist(self):
