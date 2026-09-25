@@ -8,16 +8,57 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, TypeVar
 from uuid import uuid4
 
 from cortex_relay.core.agents import AgentEvent, AgentMessage, AgentSession
+from cortex_relay.runtime.state_retry import (
+    DEFAULT_STATE_RETRY_POLICY,
+    StateRetryPolicy,
+    retry_state_operation,
+)
 
 
 _ACTIVE_STATES = {"starting", "running"}
 _TERMINAL_STATES = {"idle", "interrupted", "failed", "closed"}
 _SCHEMA_VERSION = 1
+
+# SQLite already waits out short locks through ``busy_timeout``; this budget
+# only covers the residual cases (connection churn, WAL checkpoint contention)
+# and stays deliberately small so a stuck writer never stalls a worker.
+AGENT_STORE_RETRY_POLICY = StateRetryPolicy(
+    max_attempts=3,
+    initial_delay_seconds=0.05,
+    max_delay_seconds=0.25,
+    multiplier=2.0,
+)
+
+T = TypeVar("T")
+
+
+def _retryable_transaction(operation_name: str | None = None):
+    """Re-run an idempotent store operation on a fresh connection.
+
+    Every wrapped operation either commits atomically or rolls back, and all
+    identifiers are generated inside the operation, so replaying it after a
+    transient SQLite error cannot duplicate work.
+    """
+
+    def decorate(fn: Callable[..., T]) -> Callable[..., T]:
+        @wraps(fn)
+        def wrapped(self: Any, *args: Any, **kwargs: Any) -> T:
+            return retry_state_operation(
+                lambda: fn(self, *args, **kwargs),
+                policy=getattr(self, "_retry_policy", DEFAULT_STATE_RETRY_POLICY),
+                operation_name=operation_name or f"agent-store:{fn.__name__}",
+                sleep=getattr(self, "_sleeper", time.sleep),
+            )
+
+        return wrapped
+
+    return decorate
 
 
 def _utc_now() -> str:
@@ -33,29 +74,71 @@ class AgentStore:
     and processes.
     """
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        retry_policy: StateRetryPolicy = AGENT_STORE_RETRY_POLICY,
+        sleeper: Callable[[float], None] = time.sleep,
+        fault_injector: Callable[[str, Any], None] | None = None,
+    ) -> None:
         self.root = root.expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db_path = self.root / "agent-state.sqlite3"
+        self._retry_policy = retry_policy
+        self._sleeper = sleeper
+        self._fault_injector = fault_injector
         self._setup()
+
+    def _inject_fault(self, point: str, payload: Any) -> None:
+        if self._fault_injector is not None:
+            self._fault_injector(point, payload)
+
+    def _open_connection(self) -> sqlite3.Connection:
+        def open_connection() -> sqlite3.Connection:
+            conn = sqlite3.connect(
+                self.db_path,
+                timeout=10.0,
+                isolation_level=None,
+                check_same_thread=False,
+            )
+            try:
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA foreign_keys=ON")
+                conn.execute("PRAGMA busy_timeout=10000")
+            except Exception:
+                conn.close()
+                raise
+            return conn
+
+        return retry_state_operation(
+            open_connection,
+            policy=self._retry_policy,
+            operation_name="agent-store:connect",
+            sleep=self._sleeper,
+        )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(
-            self.db_path,
-            timeout=10.0,
-            isolation_level=None,
-            check_same_thread=False,
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=10000")
+        conn = self._open_connection()
         try:
             yield conn
         finally:
             conn.close()
 
+    def _begin(self, conn: sqlite3.Connection) -> None:
+        conn.execute("BEGIN IMMEDIATE")
+        self._inject_fault("after_begin", conn)
+
     def _setup(self) -> None:
+        retry_state_operation(
+            self._apply_schema,
+            policy=self._retry_policy,
+            operation_name="agent-store:setup",
+            sleep=self._sleeper,
+        )
+
+    def _apply_schema(self) -> None:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=FULL")
@@ -260,6 +343,7 @@ class AgentStore:
             ).fetchone()
         return self._from_row(row) if row is not None else None
 
+    @_retryable_transaction()
     def update(self, session_id: str, **updates: Any) -> AgentSession:
         allowed = {
             "state",
@@ -301,6 +385,7 @@ class AgentStore:
                 raise ValueError(f"unknown agent session: {session_id}")
         return self.get(session_id)
 
+    @_retryable_transaction()
     def merge_metadata(
         self,
         session_id: str,
@@ -308,7 +393,7 @@ class AgentStore:
     ) -> AgentSession:
         """Atomically merge metadata without clobbering concurrent fields."""
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin(conn)
             try:
                 row = conn.execute(
                     "SELECT metadata FROM agent_sessions WHERE session_id = ?",
@@ -469,10 +554,11 @@ class AgentStore:
         self.get(session_id)
         return self.list(parent_session_id=session_id)
 
+    @_retryable_transaction()
     def record_event(self, event: AgentEvent) -> dict[str, Any]:
         at = event.at or _utc_now()
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin(conn)
             try:
                 exists = conn.execute(
                     "SELECT state FROM agent_sessions WHERE session_id = ?",
@@ -575,6 +661,7 @@ class AgentStore:
             for row in reversed(rows)
         ]
 
+    @_retryable_transaction()
     def add_message(
         self,
         session_id: str,
@@ -589,7 +676,7 @@ class AgentStore:
         created_at = _utc_now()
         message_id = f"msg-{uuid4().hex}"
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin(conn)
             try:
                 row = conn.execute(
                     "SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence "
@@ -690,6 +777,7 @@ class AgentStore:
             for row in reversed(rows)
         ]
 
+    @_retryable_transaction()
     def save_result(self, session_id: str, result: dict[str, Any]) -> None:
         self.get(session_id)
         payload = json.dumps(
@@ -722,6 +810,7 @@ class AgentStore:
         value = _loads(row["result"], {})
         return value if isinstance(value, dict) else None
 
+    @_retryable_transaction()
     def acquire_lease(
         self,
         session_id: str,
@@ -736,7 +825,7 @@ class AgentStore:
         now = time.time()
         expires_at = now + ttl_seconds
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin(conn)
             try:
                 row = conn.execute(
                     "SELECT owner_id, expires_at FROM agent_leases WHERE session_id = ?",
@@ -774,6 +863,7 @@ class AgentStore:
                 conn.execute("ROLLBACK")
                 raise
 
+    @_retryable_transaction()
     def heartbeat(
         self,
         session_id: str,
@@ -815,6 +905,7 @@ class AgentStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    @_retryable_transaction()
     def reconcile_expired(
         self,
         *,
@@ -833,7 +924,7 @@ class AgentStore:
         where = " AND ".join(clauses)
 
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            self._begin(conn)
             try:
                 rows = conn.execute(
                     f"""
@@ -972,7 +1063,7 @@ class AgentStore:
 
             placeholders = ",".join("?" for _ in session_ids)
             with self._connect() as conn:
-                conn.execute("BEGIN IMMEDIATE")
+                self._begin(conn)
                 try:
                     conn.execute(
                         f"DELETE FROM agent_sessions WHERE session_id IN ({placeholders})",

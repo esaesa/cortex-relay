@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 
 from concurrent.futures import ThreadPoolExecutor
@@ -9,8 +10,15 @@ from unittest.mock import patch
 
 from cortex_relay.core.agents import AgentEvent
 from cortex_relay.core.models import TaskResult, TaskSpec
-from cortex_relay.observability import RunStore, render_dashboard, summarize_usage
+from cortex_relay.observability import (
+    RunStore,
+    _updates_require_durable_write,
+    render_dashboard,
+    summarize_usage,
+)
 from cortex_relay.runtime.agent_store import AgentStore
+from cortex_relay.runtime.progress import ProgressEvent
+from cortex_relay.runtime.state_retry import StateLockTimeoutError, StateRetryPolicy
 
 
 class ObservabilityTests(unittest.TestCase):
@@ -556,7 +564,190 @@ class ObservabilityTests(unittest.TestCase):
             self.assertTrue(task_id)
 
             with patch.object(Path, "mkdir", side_effect=OSError("blocked")):
+                # Best-effort, UI-only updates stay non-fatal but are reported.
+                store.update_task(workspace, task_id, current_activity="working")
+                # A required state transition must never become a silent no-op.
+                with self.assertRaises(OSError):
+                    store.update_task(workspace, task_id, status="running")
+
+            report = store.state_failure_report()
+            self.assertGreaterEqual(report["total"], 2)
+            self.assertIn("update_task:lock", report["failures"])
+            self.assertTrue(any(event["required"] for event in report["recent"]))
+            self.assertEqual(store.get_task(workspace, task_id)["status"], "routing")
+
+
+class StateResilienceTests(unittest.TestCase):
+    """Bounded retries, atomic publish, and required-vs-best-effort writes."""
+
+    def _store(self, tmp: str, *, fault_injector=None) -> tuple[RunStore, Path]:
+        workspace = Path(tmp) / "repo"
+        workspace.mkdir(exist_ok=True)
+        store = RunStore(
+            Path(tmp) / "state",
+            retry_policy=StateRetryPolicy(
+                max_attempts=4, initial_delay_seconds=0.0, max_delay_seconds=0.0
+            ),
+            sleeper=lambda _: None,
+            fault_injector=fault_injector,
+        )
+        return store, workspace
+
+    def _tmp_files(self, root: Path) -> list[Path]:
+        return [path for path in root.rglob("*") if path.suffix == ".tmp"]
+
+    def test_transient_publish_failure_is_retried_without_leftovers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            attempts = {"count": 0}
+
+            def inject(point: str, payload: object) -> None:
+                if point == "before_publish":
+                    attempts["count"] += 1
+                    if attempts["count"] <= 2:
+                        raise PermissionError(13, "sharing violation")
+
+            store, workspace = self._store(tmp, fault_injector=inject)
+            task_id = store.start_task(TaskSpec(objective="Check", workspace=workspace))
+            store.update_task(workspace, task_id, status="running")
+
+            self.assertGreaterEqual(attempts["count"], 3)
+            self.assertEqual(store.get_task(workspace, task_id)["status"], "running")
+            self.assertEqual(self._tmp_files(Path(tmp)), [])
+            self.assertEqual(store.state_failure_report()["total"], 0)
+
+    def test_exhausted_required_write_raises_and_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            armed = {"value": False}
+
+            def inject(point: str, payload: object) -> None:
+                if armed["value"]:
+                    raise PermissionError(13, "sharing violation")
+
+            store, workspace = self._store(tmp, fault_injector=inject)
+            task_id = store.start_task(TaskSpec(objective="Check", workspace=workspace))
+            armed["value"] = True
+
+            with self.assertRaises(PermissionError):
                 store.update_task(workspace, task_id, status="running")
+            armed["value"] = False
+
+            report = store.state_failure_report()
+            self.assertGreaterEqual(report["total"], 1)
+            self.assertTrue(any(event["required"] for event in report["recent"]))
+            self.assertIn("update_task:lock", report["failures"])
+            self.assertEqual(store.get_task(workspace, task_id)["status"], "routing")
+
+    def test_best_effort_progress_failure_is_reported_but_not_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            armed = {"value": False}
+
+            def inject(point: str, payload: object) -> None:
+                if armed["value"]:
+                    raise PermissionError(13, "sharing violation")
+
+            store, workspace = self._store(tmp, fault_injector=inject)
+            task_id = store.start_task(TaskSpec(objective="Check", workspace=workspace))
+            armed["value"] = True
+            event = ProgressEvent(
+                task_id=task_id, phase="response", state="busy", activity="editing"
+            )
+
+            self.assertIsNone(store.record_progress(workspace, event))
+            self.assertIsNone(store.record_heartbeat(workspace, task_id, os.getpid(), True))
+            armed["value"] = False
+
+            report = store.state_failure_report()
+            self.assertIn("record_progress:lock", report["failures"])
+            self.assertIn("record_heartbeat:lock", report["failures"])
+            self.assertTrue(all(not item["required"] for item in report["recent"]))
+
+    def test_contended_lock_bounds_required_and_best_effort_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, workspace = self._store(tmp)
+            task_id = store.start_task(TaskSpec(objective="Check", workspace=workspace))
+            lock = store._task_lock(workspace, task_id)
+            lock.acquire()
+            try:
+                with patch(
+                    "cortex_relay.observability.OPTIONAL_LOCK_TIMEOUT_SECONDS", 0.05
+                ), patch(
+                    "cortex_relay.observability.REQUIRED_LOCK_TIMEOUT_SECONDS", 0.05
+                ), patch.object(store, "_sleeper", lambda _: None):
+                    started = time.monotonic()
+                    event = ProgressEvent(
+                        task_id=task_id, phase="response", state="busy", activity="editing"
+                    )
+                    self.assertIsNone(store.record_progress(workspace, event))
+                    self.assertLess(time.monotonic() - started, 5.0)
+
+                    with self.assertRaises(StateLockTimeoutError):
+                        store.update_task(workspace, task_id, status="running")
+            finally:
+                lock.release()
+
+            report = store.state_failure_report()
+            self.assertIn("record_progress:lock", report["failures"])
+            self.assertIn("update_task:lock", report["failures"])
+
+    def test_update_task_distinguishes_required_and_cosmetic_updates(self):
+        self.assertTrue(_updates_require_durable_write({"status": "running"}))
+        self.assertTrue(_updates_require_durable_write({"blocked_by": ["task-a"]}))
+        self.assertTrue(_updates_require_durable_write({"budget_exceeded": True}))
+        self.assertTrue(_updates_require_durable_write({"handoff_status": "ready"}))
+        self.assertTrue(_updates_require_durable_write({"artifact_id": "art-1"}))
+        self.assertFalse(_updates_require_durable_write({"current_activity": "edit"}))
+        self.assertFalse(_updates_require_durable_write({"last_event_at": "now"}))
+        self.assertFalse(_updates_require_durable_write({"progress_sequence": 4}))
+        self.assertFalse(_updates_require_durable_write({}))
+
+    def test_verify_state_paths_probes_and_cleans_up(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ = self._store(tmp)
+            result = store.verify_state_paths()
+            self.assertTrue(result["ok"])
+            self.assertTrue((store.root / "doctor").exists())
+            self.assertEqual(list((store.root / "doctor").glob("*")), [])
+            self.assertEqual(store.state_failure_report()["total"], 0)
+
+    def test_transient_read_failure_is_retried_and_exhaustion_is_reported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, workspace = self._store(tmp)
+            task_id = store.start_task(TaskSpec(objective="Check", workspace=workspace))
+            state = {"armed": False, "count": 0}
+
+            def transient(point: str, payload: object) -> None:
+                if point == "before_read" and state["armed"]:
+                    state["count"] += 1
+                    if state["count"] <= 2:
+                        raise PermissionError(13, "sharing violation")
+
+            store._fault_injector = transient
+            state["armed"] = True
+            record = store.get_task(workspace, task_id)
+            self.assertEqual(record["task_id"], task_id)
+            self.assertEqual(state["count"], 3)
+            self.assertEqual(store.state_failure_report()["total"], 0)
+
+            def permanent(point: str, payload: object) -> None:
+                if point == "before_read":
+                    raise PermissionError(13, "denied")
+
+            store._fault_injector = permanent
+            self.assertIsNone(store.get_task(workspace, task_id))
+            report = store.state_failure_report()
+            self.assertGreaterEqual(report["total"], 1)
+            self.assertIn(f"read:{task_id}.json", report["failures"])
+
+    def test_read_record_ignores_unreadable_and_malformed_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ = self._store(tmp)
+            missing = store.root / "tasks" / "absent.json"
+            self.assertIsNone(store._read_record(missing))
+            malformed = store.root / "tasks" / "broken.json"
+            malformed.parent.mkdir(parents=True, exist_ok=True)
+            malformed.write_text("{not json", encoding="utf-8")
+            self.assertIsNone(store._read_record(malformed))
+            self.assertEqual(store.state_failure_report()["total"], 0)
 
 
 if __name__ == "__main__":

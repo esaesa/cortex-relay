@@ -31,6 +31,35 @@ def configuration_checks(*, provider: str, scope: str, project_dir: Path) -> lis
     return checks
 
 
+def task_store_checks(store: Any) -> list[DiagnosticCheck]:
+    """Verify task-state lock/write paths and surface observed write failures.
+
+    Healthy state roots emit nothing, so existing doctor output is unchanged.
+    """
+    try:
+        store.verify_state_paths()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return [
+            DiagnosticCheck(
+                name="state:task-store",
+                ok=False,
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+        ]
+    report = store.state_failure_report()
+    if not report.get("total"):
+        return []
+    failures = report.get("failures") or {}
+    summary = ",".join(f"{name}={count}" for name, count in failures.items())
+    return [
+        DiagnosticCheck(
+            name="state:task-store",
+            ok=False,
+            detail=f"write_failures={report['total']} ops={summary}",
+        )
+    ]
+
+
 def runtime_checks(registry: ProviderRegistry) -> list[DiagnosticCheck]:
     checks: list[DiagnosticCheck] = []
     try:
@@ -65,4 +94,7 @@ def runtime_checks(registry: ProviderRegistry) -> list[DiagnosticCheck]:
                 detail=str(item["detail"]),
             )
         )
+    run_store = getattr(registry, "run_store", None)
+    if run_store is not None:
+        checks.extend(task_store_checks(run_store))
     return checks

@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import time
 import textwrap
 
+from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator
 from uuid import uuid4
 
 from cortex_relay.core.models import TaskResult, TaskSpec
@@ -20,6 +22,14 @@ from cortex_relay.runtime.agent_backend import AgentStoreBackend
 from cortex_relay.runtime.agent_store import AgentStore
 from cortex_relay.runtime.progress import ProgressEvent
 from cortex_relay.runtime.state_lock import FileLock, lock_is_held
+from cortex_relay.runtime.state_retry import (
+    DEFAULT_STATE_RETRY_POLICY,
+    StateAccessError,
+    StateRetryPolicy,
+    retry_state_operation,
+)
+
+logger = logging.getLogger(__name__)
 
 ACTIVE_STATUSES = {"routing", "preparing", "running", "fallback", "queued"}
 TERMINAL_STATUSES = {
@@ -28,22 +38,82 @@ TERMINAL_STATUSES = {
 }
 _TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
 
+# Required state operations bound their lock waits instead of blocking forever;
+# best-effort UI/telemetry writes give up sooner so they never stall callers.
+REQUIRED_LOCK_TIMEOUT_SECONDS = 15.0
+OPTIONAL_LOCK_TIMEOUT_SECONDS = 5.0
+_MAX_STATE_FAILURE_EVENTS = 100
 
-def _task_locked(method):
-    @wraps(method)
-    def locked(self, workspace, task_or_id, *args, **kwargs):
-        task_id = task_or_id.task_id if isinstance(task_or_id, ProgressEvent) else task_or_id
-        try:
-            lock = self._task_lock(workspace, task_id)
-            lock.acquire()
-        except OSError:
-            return None
-        try:
-            return method(self, workspace, task_or_id, *args, **kwargs)
-        finally:
-            lock.release()
+# ``update_task`` writes whose loss would change supervision, ownership,
+# dependency, worktree, handoff, or completion semantics. Everything else is
+# cosmetic and may be dropped under contention after being reported.
+_REQUIRED_UPDATE_KEYS = frozenset({
+    "status", "result_path", "output_path", "output_sha256",
+    "termination_reason", "error", "budget_exceeded", "budget_reason",
+    "owner_instance_id", "blocked_by", "depends_on", "queue_position",
+    "queued_reason", "artifact_id", "artifact_sha256", "inherited_artifact_id",
+    "handoff_status", "worktree_path", "worktree_branch", "worktree_base_commit",
+    "attempt", "attempts", "worktree_attempts", "profile", "provider", "model",
+    "billing_class", "completed_at", "duration_seconds", "usage", "usage_summary",
+    "agent_session_id", "agent_session_ids", "conversation_id", "async",
+    "priority", "group_id", "summary", "tests", "changed_files", "risks",
+})
 
-    return locked
+
+def _updates_require_durable_write(updates: dict[str, Any]) -> bool:
+    return bool(_REQUIRED_UPDATE_KEYS.intersection(updates))
+
+
+def _update_task_is_required(
+    self: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> bool:
+    """``_task_locked`` predicate: ``update_task`` is required per update keys."""
+    del self, args
+    return _updates_require_durable_write(kwargs)
+
+
+def _task_locked(method=None, *, required: bool | Callable[..., bool] = True):
+    """Serialize per-task state access through a bounded cross-process lock.
+
+    ``required=False`` (or a predicate returning ``False``) marks the call as
+    best-effort: a lock that cannot be acquired within the short deadline is
+    reported and turned into a no-op instead of failing the caller. Required
+    calls raise so a lost write can never masquerade as success.
+    """
+
+    def decorate(fn):
+        @wraps(fn)
+        def locked(self, workspace, task_or_id, *args, **kwargs):
+            task_id = (
+                task_or_id.task_id if isinstance(task_or_id, ProgressEvent)
+                else task_or_id
+            )
+            enforce = (
+                required(self, args, kwargs) if callable(required) else bool(required)
+            )
+            try:
+                lock = self._task_lock(workspace, task_id)
+                lock.acquire(
+                    timeout_seconds=(
+                        REQUIRED_LOCK_TIMEOUT_SECONDS if enforce
+                        else OPTIONAL_LOCK_TIMEOUT_SECONDS
+                    )
+                )
+            except OSError as exc:
+                self._report_state_failure(f"{fn.__name__}:lock", exc, required=enforce)
+                if enforce:
+                    raise
+                return None
+            try:
+                return fn(self, workspace, task_or_id, *args, **kwargs)
+            finally:
+                lock.release()
+
+        return locked
+
+    if method is None:
+        return decorate
+    return decorate(method)
 
 
 class RunStore:
@@ -54,10 +124,87 @@ class RunStore:
         root: Path | None = None,
         *,
         agent_store: AgentStoreBackend | None = None,
+        retry_policy: StateRetryPolicy = DEFAULT_STATE_RETRY_POLICY,
+        sleeper: Callable[[float], None] = time.sleep,
+        fault_injector: Callable[[str, Any], None] | None = None,
     ) -> None:
         self.root = (root or _default_state_root()).expanduser().resolve()
         self.agent_store = agent_store
+        self._retry_policy = retry_policy
+        self._sleeper = sleeper
+        self._fault_injector = fault_injector
         self._session_locks: dict[str, FileLock] = {}
+        self._state_failures: dict[str, int] = {}
+        self._state_failure_events: list[dict[str, Any]] = []
+
+    def _inject_fault(self, point: str, payload: Any) -> None:
+        if self._fault_injector is not None:
+            self._fault_injector(point, payload)
+
+    def state_failure_report(self) -> dict[str, Any]:
+        """Bounded-failure counters for diagnostics; empty when healthy."""
+        return {
+            "failures": dict(sorted(self._state_failures.items())),
+            "total": sum(self._state_failures.values()),
+            "recent": list(self._state_failure_events),
+        }
+
+    def verify_state_paths(self, *, timeout_seconds: float = 5.0) -> dict[str, Any]:
+        """Exercise lock, atomic publish, and read-back without touching tasks.
+
+        The probe writes only throwaway files under ``<root>/doctor`` and
+        removes them, so diagnostics never mutate production task state.
+        """
+        probe_dir = self.root / "doctor"
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        probe_id = f"probe-{os.getpid()}-{uuid4().hex[:8]}"
+        lock_path = probe_dir / f"{probe_id}.lock"
+        record_path = probe_dir / f"{probe_id}.json"
+        lock = FileLock(
+            lock_path,
+            retry_policy=self._retry_policy,
+            sleeper=self._sleeper,
+        )
+        lock.acquire(timeout_seconds=timeout_seconds)
+        try:
+            self._write_record(
+                record_path,
+                {"schema_version": 1, "kind": "probe", "probe_id": probe_id},
+                required=True,
+            )
+            record = self._read_record(record_path)
+            if not record or record.get("probe_id") != probe_id:
+                raise OSError(f"state probe read-back mismatch: {record_path}")
+        finally:
+            lock.release()
+            record_path.unlink(missing_ok=True)
+            lock_path.unlink(missing_ok=True)
+        return {"ok": True, "path": str(probe_dir)}
+
+    def _report_state_failure(
+        self, operation: str, exc: BaseException, *, required: bool
+    ) -> None:
+        self._state_failures[operation] = self._state_failures.get(operation, 0) + 1
+        self._state_failure_events.append(
+            {
+                "at": _utc_now(),
+                "operation": operation,
+                "required": required,
+                "error": f"{type(exc).__name__}: {exc}",
+                "pid": os.getpid(),
+            }
+        )
+        del self._state_failure_events[:-_MAX_STATE_FAILURE_EVENTS]
+        if required:
+            logger.error(
+                "required state operation failed (%s): %s: %s",
+                operation, type(exc).__name__, exc,
+            )
+        else:
+            logger.warning(
+                "best-effort state operation dropped (%s): %s: %s",
+                operation, type(exc).__name__, exc,
+            )
 
     def start_session(
         self,
@@ -89,8 +236,16 @@ class RunStore:
             "exit_code": None,
         }
         lock_path = self._session_lock_path(workspace, session_id)
-        session_lock = FileLock(lock_path)
-        session_lock.acquire()
+        session_lock = FileLock(
+            lock_path,
+            retry_policy=self._retry_policy,
+            sleeper=self._sleeper,
+            fault_injector=(
+                None if self._fault_injector is None
+                else lambda point, path: self._inject_fault(point, path)
+            ),
+        )
+        session_lock.acquire(timeout_seconds=REQUIRED_LOCK_TIMEOUT_SECONDS)
         try:
             self._write_record(self._session_path(workspace, session_id), record, required=True)
         except Exception:
@@ -223,7 +378,9 @@ class RunStore:
         # Publish the task record and global async index under the same per-task
         # lock. The index is only visible after the task record is durable, and
         # indexed readers acquire the same lock before trusting the pair.
-        with self._task_lock(task.workspace, task_id):
+        with self._task_lock_scope(
+            task.workspace, task_id, operation="start_task:lock"
+        ):
             if path.exists():
                 raise FileExistsError(f"task id already exists: {task_id}")
             self._write_record(path, record, required=async_task)
@@ -254,7 +411,9 @@ class RunStore:
             if not isinstance(workspace_value, str):
                 raise ValueError(f"task index lacks workspace: {task_id}")
             workspace = _workspace(Path(workspace_value))
-            with self._task_lock(workspace, task_id):
+            with self._task_lock_scope(
+                workspace, task_id, operation="find_task:lock"
+            ):
                 # Re-read the index after taking the task lock so an indexed
                 # lookup observes the same publication boundary as start_task.
                 latest_index = self._read_record(index_path)
@@ -360,7 +519,7 @@ class RunStore:
             raise ValueError("invalid owner instance id")
         return self.root / "owners" / f"{owner_instance_id}.lock"
 
-    @_task_locked
+    @_task_locked(required=False)
     def record_owner_heartbeat(self, workspace: Path, task_id: str, owner_instance_id: str) -> None:
         path = self._task_path(workspace, task_id)
         record = self._read_record(path)
@@ -369,7 +528,7 @@ class RunStore:
         if record.get("status") in TERMINAL_STATUSES:
             return
         record["owner_heartbeat_at"] = _utc_now()
-        self._write_record(path, record, required=True)
+        self._write_record(path, record)
 
     @_task_locked
     def reconcile_task(self, workspace: Path, task_id: str) -> dict[str, Any]:
@@ -426,7 +585,7 @@ class RunStore:
         self._write_record(path, record, required=True)
         return record
 
-    @_task_locked
+    @_task_locked(required=_update_task_is_required)
     def update_task(
         self,
         workspace: Path,
@@ -439,7 +598,7 @@ class RunStore:
             raise ValueError(f"task record is missing or mismatched: {task_id}")
         record.update(updates)
         record["updated_at"] = _utc_now()
-        self._write_record(path, record)
+        self._write_record(path, record, required=_updates_require_durable_write(updates))
 
     @_task_locked
     def record_worktree_attempt(
@@ -483,7 +642,7 @@ class RunStore:
                 return changed
         raise ValueError(f"unknown worktree attempt: {task_id}/{number}")
 
-    @_task_locked
+    @_task_locked(required=False)
     def record_progress(self, workspace: Path, event: ProgressEvent) -> None:
         """Keep only bounded, observable activity for a running task."""
 
@@ -535,7 +694,7 @@ class RunStore:
             record["progress_files"] = list(dict.fromkeys([*known, *event.files]))[:100]
         self._write_record(path, record)
 
-    @_task_locked
+    @_task_locked(required=False)
     def record_heartbeat(self, workspace: Path, task_id: str, pid: int, alive: bool) -> None:
         path = self._task_path(workspace, task_id)
         record = self._read_record(path)
@@ -582,8 +741,8 @@ class RunStore:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
-        except OSError:
-            pass
+        except OSError as exc:
+            self._report_state_failure(f"append_event:{path.name}", exc, required=False)
 
     @_task_locked
     def complete_task(
@@ -821,7 +980,10 @@ class RunStore:
                 if task_id in protected_dependencies:
                     continue
                 try:
-                    with self._task_lock(workspace, task_id):
+                    with self._task_lock_scope(
+                        workspace, task_id,
+                        operation="clear_completed:lock", required=False,
+                    ):
                         current = self._read_record(path)
                         if not current or current.get("status") not in TERMINAL_STATUSES:
                             continue
@@ -965,7 +1127,9 @@ class RunStore:
                 continue
             workspace = _workspace(Path(workspace_value))
             try:
-                with self._task_lock(workspace, task_id):
+                with self._task_lock_scope(
+                    workspace, task_id, operation="gc:lock", required=False,
+                ):
                     current = self._read_record(self._task_path(workspace, task_id))
                     if not current or current.get("status") not in TERMINAL_STATUSES:
                         continue
@@ -1032,7 +1196,41 @@ class RunStore:
         return self._workspace_dir(workspace) / "outputs" / f"{_safe_id(task_id)}.txt"
 
     def _task_lock(self, workspace: Path, task_id: str) -> FileLock:
-        return FileLock(self._workspace_dir(workspace) / "locks" / f"{_safe_id(task_id)}.lock")
+        return FileLock(
+            self._workspace_dir(workspace) / "locks" / f"{_safe_id(task_id)}.lock",
+            retry_policy=self._retry_policy,
+            sleeper=self._sleeper,
+            fault_injector=(
+                None if self._fault_injector is None
+                else lambda point, path: self._inject_fault(point, path)
+            ),
+        )
+
+    @contextmanager
+    def _task_lock_scope(
+        self,
+        workspace: Path,
+        task_id: str,
+        *,
+        operation: str = "task_lock",
+        required: bool = True,
+    ) -> Iterator[None]:
+        """Acquire a per-task lock with an explicit deadline, then release it."""
+        lock = self._task_lock(workspace, task_id)
+        try:
+            lock.acquire(
+                timeout_seconds=(
+                    REQUIRED_LOCK_TIMEOUT_SECONDS if required
+                    else OPTIONAL_LOCK_TIMEOUT_SECONDS
+                )
+            )
+        except StateAccessError as exc:
+            self._report_state_failure(operation, exc, required=required)
+            raise
+        try:
+            yield
+        finally:
+            lock.release()
 
     def _events_path(self, workspace: Path, task_id: str) -> Path:
         return self._workspace_dir(workspace) / "events" / f"{_safe_id(task_id)}.jsonl"
@@ -1044,34 +1242,76 @@ class RunStore:
         return self._workspace_dir(workspace) / "sessions" / f"{_safe_id(session_id)}.lock"
 
     def _write_record(self, path: Path, record: dict[str, Any], *, required: bool = False) -> None:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = path.with_suffix(path.suffix + f".{os.getpid()}.{uuid4().hex}.tmp")
-            temporary.write_text(
-                json.dumps(record, indent=2, ensure_ascii=False, sort_keys=True),
-                encoding="utf-8",
-            )
-            temporary.replace(path)
-        except OSError:
-            if required:
-                raise
-            return
+        payload = json.dumps(record, indent=2, ensure_ascii=False, sort_keys=True)
+        self._publish(path, payload, required=required, operation=f"write:{path.name}")
 
     def _write_text(self, path: Path, text: str, *, required: bool = False) -> None:
+        self._publish(path, text, required=required, operation=f"write:{path.name}")
+
+    def _publish(self, path: Path, payload: str, *, required: bool, operation: str) -> None:
+        """Serialize once, then publish through a temp file + atomic replace."""
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            temporary = path.with_suffix(path.suffix + f".{os.getpid()}.{uuid4().hex}.tmp")
-            temporary.write_text(text, encoding="utf-8")
-            temporary.replace(path)
-        except OSError:
+            def attempt() -> None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = path.with_suffix(
+                    path.suffix + f".{os.getpid()}.{uuid4().hex}.tmp"
+                )
+                try:
+                    with temporary.open("w", encoding="utf-8", newline="") as handle:
+                        handle.write(payload)
+                        handle.flush()
+                        if required:
+                            try:
+                                os.fsync(handle.fileno())
+                            except OSError:
+                                # Not every filesystem supports fsync; the
+                                # replace below stays atomic regardless.
+                                pass
+                    self._inject_fault("before_publish", path)
+                    os.replace(temporary, path)
+                except BaseException:
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise
+
+            retry_state_operation(
+                attempt,
+                policy=self._retry_policy,
+                operation_name=operation,
+                sleep=self._sleeper,
+            )
+        except StateAccessError as exc:
+            # Retry budget exhausted: surface the original OS failure so every
+            # existing ``except OSError`` rollback keeps working.
+            self._report_state_failure(operation, exc.cause, required=required)
+            if required:
+                raise exc.cause from exc
+            return
+        except OSError as exc:
+            self._report_state_failure(operation, exc, required=required)
             if required:
                 raise
             return
 
-    @staticmethod
-    def _read_record(path: Path) -> dict[str, Any] | None:
+    def _read_record(self, path: Path) -> dict[str, Any] | None:
+        def load() -> Any:
+            self._inject_fault("before_read", path)
+            return json.loads(path.read_text(encoding="utf-8"))
+
         try:
-            parsed = json.loads(path.read_text(encoding="utf-8"))
+            parsed = retry_state_operation(
+                load,
+                policy=self._retry_policy,
+                operation_name=f"read:{path.name}",
+                sleep=self._sleeper,
+            )
+        except StateAccessError as exc:
+            # Exhausted transient retries: a torn or contended read is treated
+            # like an unreadable record instead of a fatal error.
+            self._report_state_failure(f"read:{path.name}", exc.cause, required=False)
+            return None
         except (OSError, json.JSONDecodeError):
             return None
         return parsed if isinstance(parsed, dict) else None

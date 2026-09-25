@@ -1,12 +1,15 @@
+import sqlite3
 import tempfile
 import unittest
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import patch
 
 from cortex_relay.core.agents import AgentEvent
 from cortex_relay.runtime.agent_backend import AgentStoreBackend
 from cortex_relay.runtime.agent_store import AgentStore
+from cortex_relay.runtime.state_retry import StateAccessError, StateRetryPolicy
 
 
 class AgentStoreTests(unittest.TestCase):
@@ -274,6 +277,116 @@ class AgentStoreTests(unittest.TestCase):
 
             rows = store.list(workspace=workspace)
             self.assertEqual([row["session_id"] for row in rows], [local.session_id])
+
+
+class AgentStoreRetryTests(unittest.TestCase):
+    """Bounded retries for transient SQLite/WAL contention."""
+
+    def _store(self, tmp: str, *, fault_injector=None) -> AgentStore:
+        return AgentStore(
+            Path(tmp) / "state",
+            retry_policy=StateRetryPolicy(
+                max_attempts=3, initial_delay_seconds=0.0, max_delay_seconds=0.0
+            ),
+            sleeper=lambda _: None,
+            fault_injector=fault_injector,
+        )
+
+    def _session(self, store: AgentStore, workspace: Path):
+        return store.create(
+            provider="fake",
+            workspace=workspace,
+            task_id=None,
+            model="model",
+            reasoning="high",
+            access="read_only",
+            role="explorer",
+            objective="inspect",
+        )
+
+    def test_transient_transaction_failure_is_retried_without_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = {"failures": 0}
+
+            def inject(point: str, payload: object) -> None:
+                if point == "after_begin" and state["failures"] < 2:
+                    state["failures"] += 1
+                    raise PermissionError(13, "sharing violation")
+
+            store = self._store(tmp, fault_injector=inject)
+            workspace = Path(tmp) / "repo"
+            workspace.mkdir(exist_ok=True)
+            session = self._session(store, workspace)
+
+            event = store.record_event(
+                AgentEvent(
+                    session_id=session.session_id,
+                    kind="text_delta",
+                    data={"text": "working"},
+                )
+            )
+
+            self.assertEqual(state["failures"], 2)
+            self.assertEqual(event["sequence"], 1)
+            stored = store.events(session.session_id)
+            self.assertEqual(len(stored["events"]), 1)
+            self.assertEqual(store.health()["ok"], True)
+
+    def test_exhausted_transaction_retries_raise_state_access_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def inject(point: str, payload: object) -> None:
+                if point == "after_begin":
+                    raise PermissionError(13, "sharing violation")
+
+            store = self._store(tmp, fault_injector=inject)
+            workspace = Path(tmp) / "repo"
+            workspace.mkdir(exist_ok=True)
+            session = self._session(store, workspace)
+
+            with self.assertRaises(StateAccessError) as raised:
+                store.record_event(
+                    AgentEvent(session_id=session.session_id, kind="text_delta")
+                )
+            self.assertEqual(raised.exception.attempts, 3)
+            self.assertEqual(store.events(session.session_id)["events"], [])
+
+    def test_permanent_failures_are_not_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            begins = {"count": 0}
+
+            def inject(point: str, payload: object) -> None:
+                if point == "after_begin":
+                    begins["count"] += 1
+
+            store = self._store(tmp, fault_injector=inject)
+            with self.assertRaises(ValueError):
+                store.record_event(
+                    AgentEvent(session_id="agent-missing", kind="text_delta")
+                )
+            self.assertEqual(begins["count"], 1)
+
+    def test_connection_open_failures_are_bounded_and_retried(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = self._store(tmp)
+            real_connect = sqlite3.connect
+            calls = {"count": 0}
+
+            def flaky_connect(*args, **kwargs):
+                calls["count"] += 1
+                if calls["count"] <= 2:
+                    raise sqlite3.OperationalError("database is locked")
+                return real_connect(*args, **kwargs)
+
+            with patch(
+                "cortex_relay.runtime.agent_store.sqlite3.connect",
+                side_effect=flaky_connect,
+            ):
+                conn = store._open_connection()
+            try:
+                self.assertEqual(calls["count"], 3)
+            finally:
+                conn.close()
+            self.assertEqual(store.health()["ok"], True)
 
 
 if __name__ == "__main__":
