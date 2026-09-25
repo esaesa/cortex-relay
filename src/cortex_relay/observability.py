@@ -180,6 +180,10 @@ class RunStore:
             "worktree_attempts": [],
             "handoff_status": None,
             "result_path": None,
+            "output_path": None,
+            "output_chars": 0,
+            "output_bytes": 0,
+            "output_sha256": None,
             "started_at": now,
             "updated_at": now,
             "completed_at": None,
@@ -267,6 +271,55 @@ class RunStore:
             raise ValueError(f"terminal task result is missing or corrupt: {task_id}")
         return result
 
+    def get_output(
+        self,
+        workspace: Path,
+        task_id: str,
+        *,
+        offset: int = 0,
+        max_chars: int = 65536,
+    ) -> dict[str, Any]:
+        if offset < 0:
+            raise ValueError("offset must be non-negative")
+        if not 1 <= max_chars <= 200000:
+            raise ValueError("max_chars must be between 1 and 200000")
+        record = self.get_task(workspace, task_id)
+        if not record:
+            raise ValueError(f"unknown task id: {task_id}")
+        output_path = self._output_path(workspace, task_id)
+        recorded_path = record.get("output_path")
+        if recorded_path and recorded_path != str(output_path):
+            raise ValueError(f"task output path does not match its record: {task_id}")
+
+        text: str | None = None
+        if output_path.exists():
+            try:
+                text = output_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ValueError(f"task output is unreadable: {task_id}") from exc
+        else:
+            result = self.get_result(workspace, task_id)
+            if result is not None and isinstance(result.get("final_text"), str):
+                text = result["final_text"]
+
+        if text is None:
+            raise ValueError(f"task final output is unavailable: {task_id}")
+
+        total = len(text)
+        start = min(offset, total)
+        end = min(total, start + max_chars)
+        chunk = text[start:end]
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        return {
+            "task_id": task_id,
+            "text": chunk,
+            "offset": start,
+            "next_offset": end,
+            "total_chars": total,
+            "complete": end >= total,
+            "sha256": digest,
+        }
+
     def indexed_task_ids(self) -> list[str]:
         directory = self.root / "task-index"
         return [path.stem for path in directory.glob("*.json")] if directory.exists() else []
@@ -313,9 +366,17 @@ class RunStore:
             ).to_dict()
             self._write_record(result_path, result, required=True)
 
+        final_text = str(result.get("final_text") or "")
+        output_path = self._output_path(workspace, task_id)
+        self._write_text(output_path, final_text, required=True)
+        output_bytes = final_text.encode("utf-8")
         now = _utc_now()
         record.update(
             status=result["status"], result_path=str(result_path),
+            output_path=str(output_path),
+            output_chars=len(final_text),
+            output_bytes=len(output_bytes),
+            output_sha256=hashlib.sha256(output_bytes).hexdigest(),
             completed_at=now, updated_at=now, process_alive=False,
             summary=_truncate(str(result.get("summary") or ""), 420),
             error=_truncate(str(result["error"]), 420) if result.get("error") else None,
@@ -506,11 +567,19 @@ class RunStore:
         usage_summary = summarize_usage(result.usage)
         metadata = result.metadata
         result_path = self._result_path(workspace, task_id)
+        output_path = self._output_path(workspace, task_id)
+        final_text = result.final_text
+        output_bytes = final_text.encode("utf-8")
+        self._write_text(output_path, final_text, required=True)
         self._write_record(result_path, result.to_dict(), required=True)
         record.update(
             {
                 "status": result.status,
                 "result_path": str(result_path),
+                "output_path": str(output_path),
+                "output_chars": len(final_text),
+                "output_bytes": len(output_bytes),
+                "output_sha256": hashlib.sha256(output_bytes).hexdigest(),
                 "process_alive": False,
                 "provider": result.provider,
                 "model": result.model,
@@ -680,6 +749,7 @@ class RunStore:
                         path.unlink()
                         self._events_path(workspace, task_id).unlink(missing_ok=True)
                         self._result_path(workspace, task_id).unlink(missing_ok=True)
+                        self._output_path(workspace, task_id).unlink(missing_ok=True)
                         self._remove_artifact_files(current)
                         if _TASK_ID.fullmatch(task_id):
                             index_path = self._index_path(task_id)
@@ -823,6 +893,7 @@ class RunStore:
                     self._task_path(workspace, task_id).unlink(missing_ok=True)
                     self._events_path(workspace, task_id).unlink(missing_ok=True)
                     self._result_path(workspace, task_id).unlink(missing_ok=True)
+                    self._output_path(workspace, task_id).unlink(missing_ok=True)
                     self._remove_artifact_files(current)
                     index = self._index_path(task_id)
                     indexed = self._read_record(index)
@@ -868,6 +939,9 @@ class RunStore:
     def _result_path(self, workspace: Path, task_id: str) -> Path:
         return self._workspace_dir(workspace) / "results" / f"{_safe_id(task_id)}.json"
 
+    def _output_path(self, workspace: Path, task_id: str) -> Path:
+        return self._workspace_dir(workspace) / "outputs" / f"{_safe_id(task_id)}.txt"
+
     def _task_lock(self, workspace: Path, task_id: str) -> FileLock:
         return FileLock(self._workspace_dir(workspace) / "locks" / f"{_safe_id(task_id)}.lock")
 
@@ -888,6 +962,17 @@ class RunStore:
                 json.dumps(record, indent=2, ensure_ascii=False, sort_keys=True),
                 encoding="utf-8",
             )
+            temporary.replace(path)
+        except OSError:
+            if required:
+                raise
+            return
+
+    def _write_text(self, path: Path, text: str, *, required: bool = False) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(path.suffix + f".{os.getpid()}.{uuid4().hex}.tmp")
+            temporary.write_text(text, encoding="utf-8")
             temporary.replace(path)
         except OSError:
             if required:
