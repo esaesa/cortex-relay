@@ -114,13 +114,16 @@ class AgentService:
         return owner_id
 
     def _end_lease(self, session_id: str, owner_id: str) -> None:
-        with self._lock:
-            if self._lease_owners.get(session_id) == owner_id:
-                self._lease_owners.pop(session_id, None)
+        # Release durable ownership before dropping the in-process ownership
+        # marker. wait() uses that marker as its completion barrier.
         try:
             self.store.release_lease(session_id, owner_id)
         except (OSError, ValueError):
             pass
+        finally:
+            with self._lock:
+                if self._lease_owners.get(session_id) == owner_id:
+                    self._lease_owners.pop(session_id, None)
 
     def __enter__(self) -> "AgentService":
         return self
@@ -418,6 +421,16 @@ class AgentService:
                         future.result(timeout=remaining)
                     except FutureTimeoutError:
                         pass
+                # A Future is considered done before its callbacks necessarily
+                # finish. Wait for our local durable-lease cleanup barrier too so
+                # terminal wait means no turn-owned state handle is still unwinding.
+                if timeout_seconds > 0:
+                    while time.monotonic() < deadline:
+                        with self._lock:
+                            lease_cleanup_pending = session_id in self._lease_owners
+                        if not lease_cleanup_pending:
+                            break
+                        time.sleep(0.01)
                 session = self.store.get(session_id).to_dict()
                 return {
                     "agent_session_id": session_id,
