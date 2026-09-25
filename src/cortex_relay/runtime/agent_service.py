@@ -13,6 +13,7 @@ from uuid import uuid4
 from cortex_relay.core.models import TaskBudget, TaskSpec
 from cortex_relay.core.registry import ProviderRegistry
 from cortex_relay.runtime.agent_events import normalize_agent_events
+from cortex_relay.runtime.progress import normalize_progress
 
 
 class AgentService:
@@ -713,11 +714,47 @@ class AgentService:
             )
             self.store.update(session_id, state="running")
 
+            raw_budget = session.metadata.get("budget")
+            budget_values = raw_budget if isinstance(raw_budget, dict) else {}
+            budget = TaskBudget(
+                max_tokens=budget_values.get("max_tokens"),
+                max_cost=budget_values.get("max_cost"),
+                max_tool_calls=budget_values.get("max_tool_calls"),
+                max_repeated_calls=budget_values.get("max_repeated_calls"),
+                max_idle_seconds=budget_values.get("max_idle_seconds"),
+                max_runtime_seconds=budget_values.get("max_runtime_seconds"),
+                max_child_agents=budget_values.get("max_child_agents"),
+            )
+            supervision: dict[str, Any] = {
+                "tool_calls": 0,
+                "last_tool_fingerprint": None,
+                "repeated_calls": 0,
+                "child_ids": set(),
+            }
+
+            def trip_budget(reason: str, activity: str) -> None:
+                cancel_event.set()
+                self.store.merge_metadata(
+                    session_id,
+                    {
+                        "budget_exceeded": True,
+                        "budget_reason": reason,
+                        "termination_reason": "supervisor_budget",
+                        "current_activity": activity,
+                    },
+                )
+
             def progress_line(
                 provider_name: str,
                 line: str,
                 stream: str = "stdout",
             ) -> None:
+                semantic = normalize_progress(
+                    provider_name,
+                    line,
+                    session_id,
+                    stream,
+                )
                 for event in normalize_agent_events(
                     provider_name,
                     line,
@@ -725,7 +762,67 @@ class AgentService:
                     stream,
                 ):
                     self.registry.record_agent_event(provider_name, event)
+                if semantic is None:
+                    return
+                self._renew_lease_on_progress(session_id)
 
+                if semantic.phase == "tool" and semantic.state == "active":
+                    supervision["tool_calls"] = int(supervision["tool_calls"]) + 1
+                    fingerprint = (
+                        str(semantic.tool or ""),
+                        str(semantic.command or ""),
+                        str(semantic.path or ""),
+                    )
+                    if fingerprint == supervision["last_tool_fingerprint"]:
+                        supervision["repeated_calls"] = int(supervision["repeated_calls"]) + 1
+                    else:
+                        supervision["last_tool_fingerprint"] = fingerprint
+                        supervision["repeated_calls"] = 1
+                    if (
+                        budget.max_tool_calls is not None
+                        and int(supervision["tool_calls"]) > budget.max_tool_calls
+                    ):
+                        trip_budget(
+                            f"tool-call budget exceeded: {supervision['tool_calls']} > {budget.max_tool_calls}",
+                            "Tool-call budget exceeded; cancellation requested",
+                        )
+                    if (
+                        budget.max_repeated_calls is not None
+                        and int(supervision["repeated_calls"]) > budget.max_repeated_calls
+                    ):
+                        trip_budget(
+                            "repeated tool-call budget exceeded: "
+                            f"{supervision['repeated_calls']} > {budget.max_repeated_calls}; "
+                            f"fingerprint={fingerprint!r}",
+                            "Repeated tool-call stall detected; cancellation requested",
+                        )
+
+                child_ids = supervision["child_ids"]
+                if isinstance(child_ids, set):
+                    for child in semantic.subagents:
+                        if not isinstance(child, dict):
+                            continue
+                        child_id = (
+                            child.get("provider_session_id")
+                            or child.get("session_id")
+                            or child.get("id")
+                        )
+                        if child_id:
+                            child_ids.add(str(child_id))
+                    if (
+                        budget.max_child_agents is not None
+                        and len(child_ids) > budget.max_child_agents
+                    ):
+                        trip_budget(
+                            f"child-agent budget exceeded: {len(child_ids)} > {budget.max_child_agents}",
+                            "Child-agent budget exceeded; cancellation requested",
+                        )
+
+            effective_timeout = (
+                min(timeout_seconds, budget.max_runtime_seconds)
+                if budget.max_runtime_seconds is not None
+                else timeout_seconds
+            )
             task = TaskSpec(
                 objective=message,
                 role=session.role,
@@ -734,8 +831,9 @@ class AgentService:
                 access=session.access,  # type: ignore[arg-type]
                 reasoning=session.reasoning,
                 model=session.model,
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=effective_timeout,
                 isolate_write=False,
+                budget=budget,
                 metadata={
                     "_agent_session_id": session_id,
                     "_progress_line": progress_line,
@@ -764,6 +862,19 @@ class AgentService:
                 self.store.update(session_id, state="failed")
                 raise
 
+            latest_metadata = self.store.get(session_id).metadata
+            if latest_metadata.get("budget_exceeded"):
+                result = replace(
+                    result,
+                    status="budget_exceeded",
+                    summary="CortexRelay stopped the agent follow-up after a supervision budget was exceeded.",
+                    error=str(
+                        latest_metadata.get("budget_reason")
+                        or "agent follow-up supervision budget exceeded"
+                    ),
+                    termination_reason="supervisor_budget",
+                )
+
             if result.conversation_id:
                 self.store.bind_provider_session(
                     session_id,
@@ -787,7 +898,7 @@ class AgentService:
                     if result.status == "success"
                     else (
                         "interrupted"
-                        if result.status in {"cancelled", "timeout"}
+                        if result.status in {"cancelled", "timeout", "budget_exceeded"}
                         else "failed"
                     )
                 ),
