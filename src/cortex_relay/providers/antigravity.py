@@ -14,7 +14,7 @@ from cortex_relay.runtime.process import (
     ProcessRunner,
 )
 
-from .base import ProviderAdapter, ProviderCapabilities
+from .base import ProviderAdapter, ProviderCapabilities, task_execution_constraints
 from .result_schema import RESULT_SCHEMA
 
 
@@ -300,6 +300,7 @@ class AntigravityAdapter(ProviderAdapter):
             f"{access_instruction}\n\n"
             "Acceptance criteria:\n"
             f"{criteria}\n\n"
+            f"{task_execution_constraints(task)}\n\n"
             "Return structured output only. Keep summary compact, but put your COMPLETE answer "
             "to the parent in final_text. Do not compress final_text into a synopsis; preserve all "
             "material findings, conclusions, implementation details, caveats, and recommendations "
