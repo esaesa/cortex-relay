@@ -99,7 +99,11 @@ def create_server(
         allowed_paths: list[str] | None = None,
         max_failed_tests: int | None = None,
     ) -> dict[str, Any]:
-        """Delegate one bounded task and return a normalized structured result."""
+        """Run one bounded workflow/closed-end task and return its normalized result.
+
+        For a persistent specialist that may receive follow-up messages or resume,
+        use agent_start instead.
+        """
         task = _task_from_values(
             objective=objective,
             role=role,
@@ -168,7 +172,13 @@ def create_server(
         allowed_paths: list[str] | None = None,
         max_failed_tests: int | None = None,
     ) -> dict[str, Any]:
-        """Start a delegation and return its task ID immediately."""
+        """Start an asynchronous workflow task and return its task ID immediately.
+
+        Use this only when task-level workflow guarantees are needed: DAG dependencies,
+        scheduler/priority, budgets, worktree isolation, quality gates, or artifact
+        lineage. For independent parallel persistent specialists, use agent_start_async
+        instead so no unnecessary workflow task wrapper is created.
+        """
         task = _task_from_values(
             objective=objective, role=role, profile=profile, preset=preset,
             provider=provider, workspace=workspace, access=access,
