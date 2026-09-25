@@ -107,11 +107,11 @@ This keeps expensive reasoning concentrated at the points where uncertainty is h
 CortexRelay now has two deliberately separate layers:
 
 1. **Configuration bootstrap** writes standard Codex or Gemini CLI configuration, role files, and orchestration instructions.
-2. **Delegation runtime** accepts a bounded provider-neutral task, applies deterministic policy, executes a provider adapter, and returns a normalized result.
+2. **Delegation runtime** accepts a bounded provider-neutral task, applies deterministic policy, executes a provider adapter, and returns a lossless normalized result: the complete child final answer plus structured summary/evidence metadata.
 
 The primary coding agent remains responsible for decomposition, sequencing, arbitration, and final synthesis. CortexRelay does not add a second LLM planning loop.
 
-The runtime is built around a provider-neutral `TaskSpec -> TaskResult` contract. Provider-specific CLI flags, response envelopes, authentication behavior, and error translation stay inside provider adapters. The current runtime adapters target OpenCode, Antigravity CLI, and OpenAI Codex CLI.
+The runtime is built around a provider-neutral `TaskSpec -> TaskResult` contract. `TaskResult.final_text` is the complete semantic answer produced for the parent; `summary`, evidence, tests, changed files, commands, and risks are machine-readable indexes over that answer rather than replacements for it. Provider-specific CLI flags, response envelopes, authentication behavior, and error translation stay inside provider adapters. The current runtime adapters target OpenCode, Antigravity CLI, and OpenAI Codex CLI.
 
 ### Execution profiles
 
@@ -165,7 +165,7 @@ Read-only tasks are instructed not to modify files, and all current runtime adap
 
 Observability is implemented above provider adapters in the registry so every transport and provider shares one lifecycle model. Providers remain responsible only for their native execution/usage envelopes; the registry adds route/worktree/fallback context and persists the normalized task/session record.
 
-State is external to the Git checkout and keyed by the resolved workspace path. This avoids dirtying repositories and allows a separate terminal/process to monitor an active MCP worker tree. Writes are atomic and best-effort: observability is diagnostically useful but never execution-critical.
+State is external to the Git checkout and keyed by the resolved workspace path. Terminal results are persisted as JSON and complete child final answers are additionally persisted as dedicated UTF-8 output files so large answers can be retrieved in bounded chunks without semantic truncation. This avoids dirtying repositories and allows a separate terminal/process to monitor an active MCP worker tree. Writes are atomic and best-effort: observability is diagnostically useful but never execution-critical.
 
 Interactive host launches propagate only non-secret session identity fields (session ID, host profile/model/reasoning and workspace) to the injected MCP process. Provider credentials are not copied into observability records.
 
