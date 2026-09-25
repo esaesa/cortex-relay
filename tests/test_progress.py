@@ -28,6 +28,28 @@ class ProgressProjectionTests(unittest.TestCase):
         assert error is not None
         self.assertEqual(error.state, "error")
 
+    def test_codex_nested_error_projects_diagnostic_text(self):
+        event = {
+            "method": "error",
+            "params": {
+                "error": {
+                    "data": {
+                        "message": "nested provider failure",
+                    }
+                }
+            },
+        }
+        progress = normalize_progress(
+            "codex",
+            json.dumps(event),
+            "task-1",
+        )
+        self.assertIsNotNone(progress)
+        assert progress is not None
+        self.assertEqual(progress.phase, "diagnostic")
+        self.assertEqual(progress.state, "error")
+        self.assertEqual(progress.error_preview, "nested provider failure")
+
     def test_antigravity_tool_progress_preserves_metrics_and_file(self):
         event = {
             "event": "step_update",
