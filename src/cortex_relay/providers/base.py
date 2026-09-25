@@ -20,6 +20,11 @@ class ProviderCapabilities:
     detail: str = ""
     known_models: tuple[str, ...] = ()
     reasoning_levels: tuple[str, ...] = ()
+    session_mode: str = "closed_end"
+    persistent_sessions: bool = False
+    streaming_events: bool = False
+    native_subagents: bool = False
+    child_messaging: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -35,3 +40,14 @@ class ProviderAdapter(ABC):
     @abstractmethod
     def execute(self, task: TaskSpec) -> TaskResult:
         raise NotImplementedError
+
+    def continue_session(self, task: TaskSpec, provider_session_id: str) -> TaskResult:
+        """Continue a provider-backed session.
+
+        Closed-end providers intentionally do not implement this. Session-capable
+        providers should reuse the provider's native thread/conversation/session
+        handle instead of creating a fresh logical worker.
+        """
+        raise NotImplementedError(
+            f"{self.name} does not support resumable provider sessions"
+        )
