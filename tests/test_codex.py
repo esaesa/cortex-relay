@@ -14,6 +14,7 @@ class FakeRunner:
     def __init__(self, *, payload=None, returncode=0, stderr=""):
         self.payload = payload or {
             "summary": "Reviewed.",
+            "final_text": "Reviewed authentication and found no material defect.",
             "evidence": [{"finding": "No material defect", "path": "auth.py"}],
             "changed_files": [],
             "commands": ["python -m unittest"],
@@ -92,6 +93,10 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(result.provider, "codex")
         self.assertEqual(result.conversation_id, "thread-123")
         self.assertEqual(result.usage["input_tokens"], 12)
+        self.assertEqual(
+            result.final_text,
+            "Reviewed authentication and found no material defect.",
+        )
         self.assertEqual(result.evidence[0].path, "auth.py")
 
         command = runner.calls[0][0]
