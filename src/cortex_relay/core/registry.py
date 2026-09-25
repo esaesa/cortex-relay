@@ -437,28 +437,35 @@ class ProviderRegistry:
                 )
             except ValueError:
                 pass
-        try:
-            self.agent_store.update(
-                session_id,
-                state="idle" if result.status == "success" else "failed",
-            )
-            if result.final_text:
-                self.agent_store.add_message(
-                    session_id,
-                    direction="agent_to_host",
-                    content=result.final_text,
-                    sender_session_id=session_id,
-                    metadata={"final": True, "status": result.status},
-                )
-        except ValueError:
-            pass
+
         metadata = dict(result.metadata)
         metadata["agent_session_id"] = session_id
         finalized = replace(result, metadata=metadata)
+
         try:
+            if finalized.final_text:
+                self.agent_store.add_message(
+                    session_id,
+                    direction="agent_to_host",
+                    content=finalized.final_text,
+                    sender_session_id=session_id,
+                    metadata={"final": True, "status": finalized.status},
+                )
+            # Persist the durable result before exposing a terminal session state.
+            # Consumers may treat idle/failed as meaning agent_result is ready.
             self.agent_store.save_result(session_id, finalized.to_dict())
+            self.agent_store.update(
+                session_id,
+                state="idle" if finalized.status == "success" else "failed",
+            )
         except (OSError, ValueError):
-            pass
+            try:
+                self.agent_store.update(
+                    session_id,
+                    state="idle" if finalized.status == "success" else "failed",
+                )
+            except (OSError, ValueError):
+                pass
         return finalized
 
     def _observe(self, task: TaskSpec, **updates: Any) -> None:
@@ -654,17 +661,15 @@ class ProviderRegistry:
                 provider.execute_session(task),
             )
         except Exception as exc:
-            try:
-                self.agent_store.update(agent_session_id, state="failed")
-            except (OSError, ValueError):
-                pass
-            result = TaskResult(
-                status="error",
-                provider=provider.name,
-                model=task.model,
-                summary="Direct agent execution failed.",
-                error=str(exc),
-                metadata={"agent_session_id": agent_session_id},
+            result = self._finish_agent_session(
+                agent_session_id,
+                TaskResult(
+                    status="error",
+                    provider=provider.name,
+                    model=task.model,
+                    summary="Direct agent execution failed.",
+                    error=str(exc),
+                ),
             )
 
         finalized = replace(
