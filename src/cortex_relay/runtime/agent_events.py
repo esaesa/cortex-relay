@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from cortex_relay.core.agents import AgentEvent
+
+
+_SECRET_KEY = re.compile(r"(?i)(api[_-]?key|access[_-]?token|authorization|password|secret)")
+_BEARER = re.compile(r"(?i)\bBearer\s+\S+")
+_LONG_TOKEN = re.compile(r"(?<![\w])[A-Za-z0-9_+/=-]{48,}(?![\w])")
 
 
 def normalize_agent_events(
@@ -442,7 +448,7 @@ def _event(
     return AgentEvent(
         session_id=session_id,
         kind=kind,
-        data=data,
+        data=_sanitize(data),
         provider_event=provider_event,
     )
 
@@ -456,3 +462,26 @@ def _text(value: Any) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _sanitize(value: Any, *, depth: int = 0) -> Any:
+    if depth > 8:
+        return "[truncated]"
+    if isinstance(value, str):
+        text = _BEARER.sub("Bearer [redacted]", value)
+        text = _LONG_TOKEN.sub("[redacted]", text)
+        return text[:16000]
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, item in list(value.items())[:100]:
+            name = str(key)
+            if _SECRET_KEY.search(name):
+                result[name] = "[redacted]"
+            else:
+                result[name] = _sanitize(item, depth=depth + 1)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_sanitize(item, depth=depth + 1) for item in list(value)[:100]]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return str(value)[:1000]
