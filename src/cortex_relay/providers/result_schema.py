@@ -9,6 +9,7 @@ RESULT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "summary": {"type": "string"},
+        "final_text": {"type": "string"},
         "evidence": {
             "type": "array",
             "items": {
@@ -28,6 +29,6 @@ RESULT_SCHEMA: dict[str, Any] = {
         "tests": {"type": "array", "items": {"type": "string"}},
         "risks": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["summary", "evidence", "changed_files", "commands", "tests", "risks"],
+    "required": ["summary", "final_text", "evidence", "changed_files", "commands", "tests", "risks"],
     "additionalProperties": False,
 }
