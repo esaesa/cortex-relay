@@ -362,7 +362,7 @@ class RegistryTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "budget_exceeded")
-        self.assertEqual(result.termination_reason, "supervisor_budget")
+        self.assertEqual(result.termination_reason, "repeated_tool_stall")
         self.assertIn("repeated tool-call budget exceeded", result.error or "")
 
     def test_explicit_provider_bypasses_role_profile(self):
