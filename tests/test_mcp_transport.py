@@ -75,7 +75,12 @@ class MCPTransportMappingTests(unittest.TestCase):
 
     def test_server_instructions_and_tool_descriptions(self):
         from cortex_relay.transports.mcp import create_server
-        server = create_server()
+        try:
+            server = create_server()
+        except RuntimeError as exc:
+            if "MCP support is not installed" in str(exc):
+                self.skipTest("MCP optional dependency is not installed")
+            raise
         self.assertIn("synchronous delegate", server.instructions)
         self.assertIn("Never end a turn with uncompleted async tasks", server.instructions)
         self.assertIn("final_text", server.instructions)
