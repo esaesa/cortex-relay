@@ -1,9 +1,10 @@
+import json
 import tempfile
 import unittest
 
 from pathlib import Path
 
-from cortex_relay.core.models import TaskResult, TaskSpec
+from cortex_relay.core.models import TaskBudget, TaskResult, TaskSpec
 from cortex_relay.core.profiles import runtime_config_from_mapping
 from cortex_relay.core.registry import ProviderRegistry, default_registry
 from cortex_relay.providers.base import ProviderAdapter, ProviderCapabilities
@@ -45,6 +46,39 @@ class FakeProvider(ProviderAdapter):
             provider=self.name,
             model=task.model,
             summary=task.objective,
+        )
+
+
+class RepeatingToolProvider(FakeProvider):
+    def __init__(self):
+        super().__init__("opencode")
+
+    def execute(self, task):
+        self.last_task = task
+        progress = task.metadata.get("_progress_line")
+        event = json.dumps(
+            {
+                "type": "tool",
+                "sessionID": "provider-repeat-session",
+                "part": {
+                    "type": "tool",
+                    "tool": "view_file",
+                    "state": {
+                        "status": "running",
+                        "input": {"filePath": "src/example.py"},
+                    },
+                },
+            }
+        )
+        if callable(progress):
+            progress(self.name, event, "stdout")
+            progress(self.name, event, "stdout")
+            progress(self.name, event, "stdout")
+        return TaskResult(
+            status="success",
+            provider=self.name,
+            model=task.model,
+            summary="would have succeeded without supervisor",
         )
 
 
@@ -258,6 +292,55 @@ class RegistryTests(unittest.TestCase):
             snapshot["tasks"][0]["task_id"],
             result.metadata["task_id"],
         )
+
+    def test_auto_routing_falls_back_after_timeout_and_records_health(self):
+        primary = FakeProvider("antigravity", status="timeout")
+        backup = FakeProvider("codex", status="success")
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = ProviderRegistry(
+                [primary, backup],
+                profiles=StaticResolver({}),
+                run_store=RunStore(Path(tmp) / "state"),
+            )
+            result = registry.execute(
+                TaskSpec(
+                    objective="Inspect",
+                    provider="auto",
+                    workspace=Path(tmp),
+                )
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.provider, "codex")
+        self.assertEqual(
+            [item["status"] for item in result.metadata["auto_routing_attempts"]],
+            ["timeout", "success"],
+        )
+        self.assertEqual(registry.provider_health("antigravity")["timeouts"], 1)
+        self.assertEqual(registry.provider_health("codex")["successes"], 1)
+
+    def test_repeated_tool_budget_stops_worker_semantically(self):
+        provider = RepeatingToolProvider()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "repo"
+            workspace.mkdir()
+            registry = ProviderRegistry(
+                [provider],
+                profiles=StaticResolver({}),
+                run_store=RunStore(Path(tmp) / "state"),
+            )
+            result = registry.execute(
+                TaskSpec(
+                    objective="Inspect one file",
+                    provider="opencode",
+                    workspace=workspace,
+                    budget=TaskBudget(max_repeated_calls=2),
+                )
+            )
+
+        self.assertEqual(result.status, "budget_exceeded")
+        self.assertEqual(result.termination_reason, "supervisor_budget")
+        self.assertIn("repeated tool-call budget exceeded", result.error or "")
 
     def test_explicit_provider_bypasses_role_profile(self):
         opencode = FakeProvider("opencode")
