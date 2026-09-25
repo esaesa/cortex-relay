@@ -333,6 +333,9 @@ class CLIRuntimeTests(unittest.TestCase):
         self.assertEqual(FakeHostAdapter.last_task.profile, "muse")
         self.assertEqual(FakeHostAdapter.last_task.model, "opencode/muse")
         self.assertEqual(FakeHostAdapter.last_task.reasoning, "xhigh")
+        state_dir = FakeHostAdapter.last_task.metadata.get("cortex_relay_state_dir")
+        self.assertIsInstance(state_dir, str)
+        self.assertTrue(state_dir)
 
     def test_delegate_json(self):
         registry = FakeRegistry()

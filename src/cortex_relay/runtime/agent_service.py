@@ -404,6 +404,7 @@ class AgentService:
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds must be non-negative")
         deadline = time.monotonic() + min(timeout_seconds, 5.0)
+        poll_delay = 0.02
 
         while True:
             session = self.store.get(session_id).to_dict()
@@ -447,7 +448,9 @@ class AgentService:
                     "session": session,
                     "result": self.store.result(session_id),
                 }
-            time.sleep(0.05)
+            remaining = max(0.0, deadline - time.monotonic())
+            time.sleep(min(poll_delay, remaining))
+            poll_delay = min(0.25, poll_delay * 1.6)
 
     @staticmethod
     def format_event(event: dict[str, Any]) -> str | None:
@@ -525,6 +528,7 @@ class AgentService:
             raise ValueError("limit must be 1..200")
 
         deadline = time.monotonic() + min(timeout_seconds, 30.0)
+        poll_delay = 0.05
         while True:
             event_payload = self.events(
                 session_id,
@@ -553,7 +557,9 @@ class AgentService:
                     "next_sequence": event_payload["next_sequence"],
                     "result": self.result(session_id) if complete else None,
                 }
-            time.sleep(0.1)
+            remaining = max(0.0, deadline - time.monotonic())
+            time.sleep(min(poll_delay, remaining))
+            poll_delay = min(0.25, poll_delay * 1.5)
 
     def result(self, session_id: str) -> dict[str, Any] | None:
         return self.store.result(session_id)

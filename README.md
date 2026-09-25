@@ -197,7 +197,7 @@ Completed history can be cleared without affecting active tasks:
 cortex-relay history --clear
 ```
 
-Runtime state is intentionally stored outside the Git checkout. On Windows the default is under `%LOCALAPPDATA%\CortexRelay\state`; on Unix-like systems CortexRelay uses `$XDG_STATE_HOME/cortex-relay` or `~/.local/state/cortex-relay`. Set `CORTEX_RELAY_STATE_DIR` to override it.
+Runtime state is intentionally stored outside the Git checkout. On Windows the default is under `%LOCALAPPDATA%\CortexRelay\state`; on Unix-like systems CortexRelay uses `$XDG_STATE_HOME/cortex-relay` or `~/.local/state/cortex-relay`. Set `CORTEX_RELAY_STATE_DIR` to override it. Interactive OpenCode hosts isolate their own temporary XDG model/variant state, but CortexRelay explicitly pins the canonical control-plane state directory into the embedded MCP process so direct agents and `status --watch` always share one durable store.
 
 Workflow observability remains defensive, but durable agent-session state is now control-plane state rather than optional telemetry. Direct sessions require a writable CortexRelay state directory so session identity, event/message cursors, leases, cancellation ownership, and results cannot silently disappear.
 
@@ -306,7 +306,7 @@ Primary coding agent
 
 The calling agent remains the orchestrator. CortexRelay owns deterministic routing, session control, event persistence, child topology, workspace isolation, and normalized results rather than adding another planning model.
 
-Direct-agent control state is persisted transactionally in a local SQLite database using WAL mode. Event and message sequences are allocated atomically, provider-session lookup and child traversal are indexed, and each active direct turn owns a renewable lease. A new runtime reconciles expired leases to `interrupted` instead of leaving zombie sessions marked running. This is the production-grade **single-host** backend; multi-host/multi-replica deployment should use a future external AgentStore backend rather than sharing the SQLite file over a network filesystem.
+Direct-agent control state is persisted transactionally in a local SQLite database using WAL mode. The database carries an explicit schema version and supports integrity diagnostics through `cortex-relay doctor`. Event and message sequences are allocated atomically, provider-session lookup and child traversal are indexed, and each active direct turn owns a renewable lease. A new runtime reconciles expired leases to `interrupted` instead of leaving zombie sessions marked running. This is the production-grade **single-host** backend; multi-host/multi-replica deployment should use a future external AgentStore backend rather than sharing the SQLite file over a network filesystem.
 
 The MCP surface now includes direct agent controls: `agent_start`, `agent_start_async`, `agent_wait`, `agent_watch`, `agent_result`, `agents`, `agent_get`, `agent_events`, cursor-based `agent_messages`, `agent_children`, `agent_send`, provider-backed `agent_cancel`, and `agent_close`. Use `agent_start_async` for independent parallel persistent specialists, `agent_start` when the first turn is immediately required, and `delegate_async` only when you need DAG scheduling, worktree isolation, budgets, quality gates, or artifact lineage. Direct-agent `access=auto` inherits the selected profile's access. Completed task results expose `agent_session_id`, while `task_output` remains the lossless chunked final-answer channel.
 

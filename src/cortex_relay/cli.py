@@ -270,12 +270,23 @@ def _doctor(provider: str, scope: str, project_dir: Path, *, runtime_only: bool)
 
     print("CortexRelay diagnostics:")
     for check in [*config, *runtime]:
-        marker = "OK" if check.ok else ("MISSING" if check.name.startswith("config:") else "OPTIONAL")
+        if check.ok:
+            marker = "OK"
+        elif check.name.startswith("config:"):
+            marker = "MISSING"
+        elif check.name.startswith("state:"):
+            marker = "FAIL"
+        else:
+            marker = "OPTIONAL"
         print(f"  {marker:<8} {check.name}: {check.detail}")
 
+    state_checks = [check for check in runtime if check.name.startswith("state:")]
+    provider_checks = [check for check in runtime if check.name.startswith("runtime:")]
+    state_ok = all(check.ok for check in state_checks)
+    provider_ok = any(check.ok for check in provider_checks)
     if runtime_only:
-        return 0 if runtime and any(check.ok for check in runtime) else 1
-    return 0 if all(check.ok for check in config) else 1
+        return 0 if state_ok and provider_ok else 1
+    return 0 if state_ok and all(check.ok for check in config) else 1
 
 
 def _providers() -> int:
@@ -447,11 +458,22 @@ def _gc(args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
         mode = "Would prune" if args.dry_run else "Pruned"
-        print(f"{mode} {result['count']} terminal task record(s).")
+        print(
+            f"{mode} {result['count']} terminal task record(s) and "
+            f"{result.get('agent_count', 0)} terminal agent tree(s)."
+        )
         for item in result["tasks"][:25]:
-            print(f"  {item['task_id']}")
+            print(f"  task  {item['task_id']}")
         if len(result["tasks"]) > 25:
-            print(f"  ... and {len(result['tasks']) - 25} more")
+            print(f"  ... and {len(result['tasks']) - 25} more task(s)")
+        agents = result.get("agents") or []
+        for item in agents[:25]:
+            print(
+                f"  agent {item['root_session_id']} "
+                f"({len(item.get('sessions') or [])} session(s))"
+            )
+        if len(agents) > 25:
+            print(f"  ... and {len(agents) - 25} more agent tree(s)")
     return 0
 
 
@@ -663,6 +685,10 @@ def _launch(args: argparse.Namespace) -> int:
         "profile_options": dict(profile.options),
         "billing_class": profile.billing_class,
         "session_id": session_id,
+        # The interactive OpenCode host gets an isolated XDG state directory for
+        # its own model/variant state. Pin CortexRelay's durable control-plane
+        # state explicitly so the embedded MCP server cannot inherit that temp root.
+        "cortex_relay_state_dir": str(run_store.root),
     }
     contract = _orchestrator_contract(config, preset=args.preset)
     metadata["host_prompt"] = (

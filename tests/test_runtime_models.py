@@ -1,3 +1,5 @@
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +27,22 @@ class RuntimeModelTests(unittest.TestCase):
     def test_future_reasoning_name_is_accepted(self):
         task = TaskSpec(objective="Review", reasoning="Future-Effort")
         self.assertEqual(task.reasoning, "future-effort")
+
+    def test_runtime_state_modules_import_cleanly_in_fresh_process(self):
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import cortex_relay.observability; "
+                    "import cortex_relay.runtime.agent_store"
+                ),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_result_serialization(self):
         result = TaskResult(

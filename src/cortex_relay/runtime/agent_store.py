@@ -17,6 +17,7 @@ from cortex_relay.core.agents import AgentEvent, AgentMessage, AgentSession
 
 _ACTIVE_STATES = {"starting", "running"}
 _TERMINAL_STATES = {"idle", "interrupted", "failed", "closed"}
+_SCHEMA_VERSION = 1
 
 
 def _utc_now() -> str:
@@ -58,6 +59,12 @@ class AgentStore:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=FULL")
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            if version > _SCHEMA_VERSION:
+                raise RuntimeError(
+                    "agent state schema is newer than this CortexRelay build: "
+                    f"{version} > {_SCHEMA_VERSION}"
+                )
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS agent_sessions (
@@ -150,6 +157,32 @@ class AgentStore:
                 ON agent_leases(expires_at);
                 """
             )
+            # Version 0 is the unversioned schema shipped before migrations were
+            # introduced. The CREATE IF NOT EXISTS statements above make that
+            # schema compatible with v1, so the first open performs an in-place
+            # migration by stamping the durable SQLite user_version.
+            if version == 0:
+                conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+
+    def schema_version(self) -> int:
+        with self._connect() as conn:
+            return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+    def integrity_check(self) -> tuple[str, ...]:
+        """Return SQLite quick-check diagnostics; ("ok",) means healthy."""
+        with self._connect() as conn:
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def health(self) -> dict[str, Any]:
+        integrity = self.integrity_check()
+        return {
+            "db_path": str(self.db_path),
+            "schema_version": self.schema_version(),
+            "expected_schema_version": _SCHEMA_VERSION,
+            "integrity": list(integrity),
+            "ok": integrity == ("ok",) and self.schema_version() == _SCHEMA_VERSION,
+        }
 
     def create(
         self,
@@ -864,6 +897,103 @@ class AgentStore:
                 pass
         return ids
 
+    def gc(
+        self,
+        *,
+        workspace: Path | None = None,
+        retention_days: int = 30,
+        max_completed_roots: int = 1000,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Prune terminal agent trees while preserving active lineage.
+
+        Sessions are retained/deleted by root tree rather than individually so
+        parent/child topology never becomes partially orphaned.
+        """
+        if retention_days < 0:
+            raise ValueError("retention_days must be non-negative")
+        if max_completed_roots < 0:
+            raise ValueError("max_completed_roots must be non-negative")
+
+        clauses: list[str] = []
+        params: list[Any] = []
+        if workspace is not None:
+            clauses.append("workspace = ?")
+            params.append(str(workspace.expanduser().resolve()))
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT session_id, root_session_id, workspace, state, "
+                f"created_at, updated_at FROM agent_sessions{where}",
+                params,
+            ).fetchall()
+
+        groups: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            root_id = str(row["root_session_id"] or row["session_id"])
+            groups.setdefault(root_id, []).append(row)
+
+        candidates: list[tuple[float, str, list[sqlite3.Row]]] = []
+        for root_id, members in groups.items():
+            if any(str(member["state"]) not in _TERMINAL_STATES for member in members):
+                continue
+            stamp = max(
+                _iso_timestamp(member["updated_at"] or member["created_at"])
+                for member in members
+            )
+            candidates.append((stamp, root_id, members))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        keep_roots = {
+            root_id
+            for _, root_id, _ in candidates[:max_completed_roots]
+        }
+        cutoff = time.time() - retention_days * 86400
+
+        planned: list[dict[str, Any]] = []
+        for stamp, root_id, members in candidates:
+            expired = stamp < cutoff
+            over_count = root_id not in keep_roots
+            if not (expired or over_count):
+                continue
+            session_ids = [str(member["session_id"]) for member in members]
+            entry = {
+                "root_session_id": root_id,
+                "workspace": str(members[0]["workspace"]),
+                "sessions": session_ids,
+                "expired": expired,
+                "over_count": over_count,
+            }
+            planned.append(entry)
+            if dry_run:
+                continue
+
+            placeholders = ",".join("?" for _ in session_ids)
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    conn.execute(
+                        f"DELETE FROM agent_sessions WHERE session_id IN ({placeholders})",
+                        session_ids,
+                    )
+                    conn.execute("COMMIT")
+                except Exception:
+                    conn.execute("ROLLBACK")
+                    raise
+
+        return {
+            "dry_run": dry_run,
+            "workspace": (
+                str(workspace.expanduser().resolve())
+                if workspace is not None else None
+            ),
+            "retention_days": retention_days,
+            "max_completed_roots": max_completed_roots,
+            "count": len(planned),
+            "agents": planned,
+        }
+
     def close(self, session_id: str) -> AgentSession:
         session = self.get(session_id)
         if session.state in _ACTIVE_STATES:
@@ -947,6 +1077,15 @@ class AgentStore:
             "metadata": metadata if isinstance(metadata, dict) else {},
             "sequence": int(row["sequence"]),
         }
+
+
+def _iso_timestamp(value: Any) -> float:
+    if not isinstance(value, str):
+        return 0.0
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _loads(value: Any, fallback: Any) -> Any:

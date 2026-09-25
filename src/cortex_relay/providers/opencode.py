@@ -120,6 +120,16 @@ class OpenCodeAdapter(ProviderAdapter):
         env["CORTEX_RELAY_HOST_REASONING"] = task.reasoning
         env["CORTEX_RELAY_WORKSPACE"] = str(task.workspace)
 
+        # launch_host() deliberately replaces XDG_STATE_HOME with a temporary
+        # directory so OpenCode can have an isolated model/variant selection.
+        # The embedded CortexRelay MCP process inherits this environment, so pin
+        # our durable state root independently before XDG_STATE_HOME is replaced.
+        state_dir = task.metadata.get("cortex_relay_state_dir")
+        if isinstance(state_dir, str) and state_dir.strip():
+            env["CORTEX_RELAY_STATE_DIR"] = str(
+                Path(state_dir).expanduser().resolve()
+            )
+
         config: dict[str, Any] = {}
         raw = os.environ.get("OPENCODE_CONFIG_CONTENT")
         if raw:

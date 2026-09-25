@@ -8,6 +8,7 @@ from cortex_relay.core.profiles import runtime_config_from_mapping
 from cortex_relay.core.registry import ProviderRegistry, default_registry
 from cortex_relay.providers.base import ProviderAdapter, ProviderCapabilities
 from cortex_relay.observability import RunStore
+from cortex_relay.runtime.agent_store import AgentStore
 
 
 class FakeProvider(ProviderAdapter):
@@ -56,6 +57,20 @@ class StaticResolver:
 
 
 class RegistryTests(unittest.TestCase):
+    def test_registry_and_runstore_share_injected_agent_backend(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_store = RunStore(root / "state")
+            agent_store = AgentStore(root / "custom-agent-state")
+            registry = ProviderRegistry(
+                [FakeProvider()],
+                profiles=StaticResolver({}),
+                run_store=run_store,
+                agent_store=agent_store,
+            )
+            self.assertIs(registry.agent_store, agent_store)
+            self.assertIs(registry.run_store.agent_store, agent_store)
+
     def test_explicit_provider_executes(self):
         provider = FakeProvider()
         registry = ProviderRegistry([provider], profiles=StaticResolver({}))

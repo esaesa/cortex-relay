@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 
@@ -191,6 +192,41 @@ class ObservabilityTests(unittest.TestCase):
             )
             self.assertEqual(parent_row["current_activity"], "spawned child explorer")
             self.assertTrue(parent_row["recent_events"])
+
+    def test_default_store_reopens_same_canonical_agent_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            workspace = Path(tmp) / "repo"
+            workspace.mkdir()
+            with patch.dict(
+                os.environ,
+                {"CORTEX_RELAY_STATE_DIR": str(root)},
+                clear=False,
+            ):
+                writer = RunStore()
+                agents = AgentStore(writer.root)
+                session = agents.create(
+                    provider="opencode",
+                    workspace=workspace,
+                    task_id=None,
+                    model="muse",
+                    reasoning="high",
+                    access="read_only",
+                    role="explorer",
+                    objective="cross-process visibility",
+                )
+                agents.update(session.session_id, state="running")
+
+                reader = RunStore()
+                snapshot = reader.snapshot(workspace, active_only=True)
+
+            self.assertEqual(writer.root, root.resolve())
+            self.assertEqual(reader.root, root.resolve())
+            self.assertEqual(
+                [item["session_id"] for item in snapshot["agents"]],
+                [session.session_id],
+            )
+            self.assertEqual(snapshot["agent_summary"]["running"], 1)
 
     def test_dashboard_renders_agents_even_when_no_workflow_tasks_exist(self):
         snapshot = {
@@ -467,6 +503,45 @@ class ObservabilityTests(unittest.TestCase):
             self.assertEqual(result["count"], 1)
             self.assertIsNone(store.get_task(workspace, old_id))
             self.assertIsNotNone(store.get_task(workspace, active_id))
+
+    def test_gc_includes_terminal_direct_agent_trees(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "repo"
+            workspace.mkdir()
+            store = RunStore(root / "state")
+            agents = AgentStore(store.root)
+            session = agents.create(
+                provider="fake",
+                workspace=workspace,
+                task_id=None,
+                model="model",
+                reasoning="high",
+                access="read_only",
+                role="reviewer",
+                objective="done",
+            )
+            agents.update(session.session_id, state="idle")
+
+            preview = store.gc(
+                workspace=workspace,
+                retention_days=0,
+                max_completed_tasks=100,
+                max_event_log_mb=10,
+                dry_run=True,
+            )
+            self.assertEqual(preview["agent_count"], 1)
+
+            result = store.gc(
+                workspace=workspace,
+                retention_days=0,
+                max_completed_tasks=100,
+                max_event_log_mb=10,
+                dry_run=False,
+            )
+            self.assertEqual(result["agent_count"], 1)
+            with self.assertRaises(ValueError):
+                agents.get(session.session_id)
 
     def test_state_is_outside_workspace_and_write_failures_are_nonfatal(self):
         with tempfile.TemporaryDirectory() as tmp:
