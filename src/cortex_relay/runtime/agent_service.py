@@ -25,6 +25,16 @@ class AgentService:
         self._futures: dict[str, Future[Any]] = {}
         self._lock = threading.Lock()
 
+    def shutdown(self, *, wait: bool = true) -> None:
+        """Release direct-agent worker threads owned by this service."""
+        self.executor.shutdown(wait=wait, cancel_futures=True)
+
+    def __enter__(self) -> "AgentService":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.shutdown(wait=True)
+
     def _resolve_access(
         self,
         *,
@@ -213,6 +223,12 @@ class AgentService:
         session_id = holder["session_id"]
         with self._lock:
             self._futures[session_id] = future
+
+        def _forget(_future: Future[Any]) -> None:
+            with self._lock:
+                self._futures.pop(session_id, None)
+
+        future.add_done_callback(_forget)
         session = self.store.get(session_id).to_dict()
         return {
             "agent_session_id": session_id,
