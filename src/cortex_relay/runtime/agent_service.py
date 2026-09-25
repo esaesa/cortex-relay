@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,16 @@ class AgentService:
         )
         self._futures: dict[str, Future[Any]] = {}
         self._lock = threading.Lock()
+
+    def shutdown(self, *, wait: bool = True) -> None:
+        """Release direct-agent worker threads owned by this service."""
+        self.executor.shutdown(wait=wait, cancel_futures=True)
+
+    def __enter__(self) -> "AgentService":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.shutdown(wait=True)
 
     def _resolve_access(
         self,
@@ -213,6 +223,12 @@ class AgentService:
         session_id = holder["session_id"]
         with self._lock:
             self._futures[session_id] = future
+
+        def _forget(_future: Future[Any]) -> None:
+            with self._lock:
+                self._futures.pop(session_id, None)
+
+        future.add_done_callback(_forget)
         session = self.store.get(session_id).to_dict()
         return {
             "agent_session_id": session_id,
@@ -234,15 +250,35 @@ class AgentService:
 
         while True:
             session = self.store.get(session_id).to_dict()
-            result = self.store.result(session_id)
             complete = session["state"] not in {"starting", "running"}
-            if complete or timeout_seconds == 0 or time.monotonic() >= deadline:
+            if complete:
+                # A provider thread may still be unwinding after it publishes the
+                # terminal session state. Join it within the caller's remaining
+                # wait budget so durable result metadata and filesystem handles are
+                # settled before returning.
+                with self._lock:
+                    future = self._futures.get(session_id)
+                if future is not None and not future.done() and timeout_seconds > 0:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    try:
+                        future.result(timeout=remaining)
+                    except FutureTimeoutError:
+                        pass
+                session = self.store.get(session_id).to_dict()
                 return {
                     "agent_session_id": session_id,
                     "status": session["state"],
-                    "complete": complete,
+                    "complete": True,
                     "session": session,
-                    "result": result,
+                    "result": self.store.result(session_id),
+                }
+            if timeout_seconds == 0 or time.monotonic() >= deadline:
+                return {
+                    "agent_session_id": session_id,
+                    "status": session["state"],
+                    "complete": False,
+                    "session": session,
+                    "result": self.store.result(session_id),
                 }
             time.sleep(0.05)
 
