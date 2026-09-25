@@ -40,11 +40,21 @@ class StateRetryPolicyTests(unittest.TestCase):
 
 
 class TransientClassificationTests(unittest.TestCase):
+    @staticmethod
+    def _windows_os_error(message: str, winerror: int) -> OSError:
+        # On Windows the 4th OSError argument populates ``.winerror``; on
+        # POSIX it is only kept in ``.args``, so attach it explicitly to
+        # exercise the Windows classification path on every platform.
+        exc = OSError(0, message, None, winerror)
+        if getattr(exc, "winerror", None) is None:
+            exc.winerror = winerror
+        return exc
+
     def test_transient_windows_and_filesystem_conditions(self) -> None:
         self.assertTrue(is_transient_state_error(PermissionError(errno.EACCES, "denied")))
         self.assertTrue(is_transient_state_error(OSError(errno.EBUSY, "busy")))
-        self.assertTrue(is_transient_state_error(OSError(0, "sharing", None, 32)))
-        self.assertTrue(is_transient_state_error(OSError(0, "lock", None, 33)))
+        self.assertTrue(is_transient_state_error(self._windows_os_error("sharing", 32)))
+        self.assertTrue(is_transient_state_error(self._windows_os_error("lock", 33)))
         self.assertTrue(
             is_transient_state_error(sqlite3.OperationalError("database is locked"))
         )
