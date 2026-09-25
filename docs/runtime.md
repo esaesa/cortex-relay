@@ -95,6 +95,13 @@ Use a second terminal for a live dashboard:
 cortex-relay status --watch
 ```
 
+The live dashboard is unified across the selected workspace: it reads the tracked
+host launch, workflow tasks, direct `AgentSession` records created by
+`agent_start`/`agent_start_async`, and mirrored provider-native child agents.
+Watch mode renders active agent rows while keeping workspace-wide running/idle/failed
+agent totals visible. Recent semantic agent events are shown as current activity;
+add `-v` or `-vv` for recent event detail.
+
 One-shot and machine-readable forms:
 
 ```bash
