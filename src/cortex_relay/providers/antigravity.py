@@ -8,7 +8,11 @@ from typing import Any
 
 from cortex_relay.core.models import Evidence, TaskResult, TaskSpec
 from cortex_relay.runtime.progress import runner_progress_kwargs
-from cortex_relay.runtime.process import ProcessCancelledError, ProcessRunner
+from cortex_relay.runtime.process import (
+    ProcessCancelledError,
+    ProcessIdleTimeoutError,
+    ProcessRunner,
+)
 
 from .base import ProviderAdapter, ProviderCapabilities
 from .result_schema import RESULT_SCHEMA
@@ -102,7 +106,7 @@ class AntigravityAdapter(ProviderAdapter):
             "--add-dir",
             str(task.workspace),
             "--print-timeout",
-            f"{task.timeout_seconds}s",
+            f"{_provider_timeout_seconds(task)}s",
             "--sandbox",
         ]
         if task.reasoning and task.reasoning != "default" and _supports_effort(task.model):
@@ -181,6 +185,16 @@ class AntigravityAdapter(ProviderAdapter):
                 model=task.model,
                 summary="Antigravity task was cancelled.",
                 error="provider process cancelled",
+                termination_reason="cancelled",
+            )
+        except ProcessIdleTimeoutError as exc:
+            return TaskResult(
+                status="timeout",
+                provider=self.name,
+                model=task.model,
+                summary="Antigravity task stalled without provider progress.",
+                error=f"idle timeout after {exc.idle_timeout_seconds:g} seconds",
+                termination_reason="idle_timeout",
             )
         except subprocess.TimeoutExpired:
             return TaskResult(
@@ -189,6 +203,7 @@ class AntigravityAdapter(ProviderAdapter):
                 model=task.model,
                 summary="Antigravity task timed out.",
                 error=f"timeout after {task.timeout_seconds} seconds",
+                termination_reason="execution_timeout",
             )
 
         stderr_text = result.stderr.strip()
@@ -207,6 +222,7 @@ class AntigravityAdapter(ProviderAdapter):
                     if partial_summary else "Antigravity task timed out before producing a final result."
                 ),
                 error=stderr_text or f"timeout after {task.timeout_seconds} seconds",
+                termination_reason="provider_print_timeout",
                 conversation_id=_optional_string(partial.get("conversation_id")),
                 usage=_dict_or_empty(partial.get("usage")),
             )
@@ -393,3 +409,12 @@ def _supports_effort(model: str | None) -> bool:
     if not isinstance(model, str):
         return True
     return not model.strip().lower().startswith("claude-")
+
+
+def _provider_timeout_seconds(task: TaskSpec) -> int:
+    """Reserve a small outer-runtime window for diagnostics and graceful cleanup."""
+    explicit = task.metadata.get("_provider_timeout_seconds")
+    if isinstance(explicit, (int, float)) and explicit > 0:
+        return max(1, min(int(explicit), task.timeout_seconds))
+    reserve = min(15, max(1, task.timeout_seconds // 10))
+    return max(1, task.timeout_seconds - reserve)
