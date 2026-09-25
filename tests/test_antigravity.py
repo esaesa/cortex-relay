@@ -68,6 +68,7 @@ class AntigravityTests(unittest.TestCase):
             "usage": {"total_tokens": 10},
             "structured_output": {
                 "summary": "One issue.",
+                "final_text": "The complete review found one missing authorization check.",
                 "evidence": [{"finding": "Missing check", "path": "auth.py"}],
                 "changed_files": [],
                 "commands": [],
@@ -96,6 +97,10 @@ class AntigravityTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.conversation_id, "abc")
+        self.assertEqual(
+            result.final_text,
+            "The complete review found one missing authorization check.",
+        )
         self.assertEqual(result.evidence[0].path, "auth.py")
 
     @patch("cortex_relay.providers.antigravity.shutil.which", return_value="/usr/bin/agy")
