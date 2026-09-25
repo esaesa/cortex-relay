@@ -196,6 +196,8 @@ class RunStore:
             "summary": None,
             "error": None,
             "conversation_id": None,
+            "agent_session_id": None,
+            "agent_session_ids": [],
             "owner_pid": os.getpid(),
             "timeout_seconds": task.timeout_seconds,
             "current_activity": None,
