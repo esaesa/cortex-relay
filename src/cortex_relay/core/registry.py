@@ -19,7 +19,7 @@ from cortex_relay.providers.codex import CodexAdapter
 from cortex_relay.providers.opencode import OpenCodeAdapter
 from cortex_relay.observability import RunStore, summarize_usage
 from cortex_relay.runtime.artifacts import ArtifactStore
-from cortex_relay.runtime.progress import normalize_progress
+from cortex_relay.runtime.progress import normalize_progress_events
 from cortex_relay.runtime.worktree import WorktreeManager
 
 
@@ -198,26 +198,37 @@ class ProviderRegistry:
                             exc,
                         )
 
-            event = normalize_progress(provider, line, task_id, stream)
-            if event is None:
+            progress_events = normalize_progress_events(
+                provider, line, task_id, stream
+            )
+            if not progress_events:
                 return
-            self.run_store.record_progress(source_workspace, event)
-            if callable(external_progress):
-                try:
-                    external_progress(event)
-                except Exception:
-                    pass
+
+            observed_tokens: int | None = None
+            for event in progress_events:
+                self.run_store.record_progress(source_workspace, event)
+                if callable(external_progress):
+                    try:
+                        external_progress(event)
+                    except Exception:
+                        pass
+                candidate = event.total_tokens
+                if candidate is None and (
+                    event.input_tokens is not None
+                    or event.output_tokens is not None
+                ):
+                    candidate = (
+                        (event.input_tokens or 0) + (event.output_tokens or 0)
+                    )
+                if candidate is not None:
+                    observed_tokens = max(observed_tokens or 0, candidate)
+
             limit = task.budget.max_tokens
-            if limit is None:
-                return
-            observed = event.total_tokens
-            if observed is None:
-                observed = (
-                    (event.input_tokens or 0) + (event.output_tokens or 0)
-                    if event.input_tokens is not None or event.output_tokens is not None
-                    else None
-                )
-            if observed is not None and observed > limit:
+            if (
+                limit is not None
+                and observed_tokens is not None
+                and observed_tokens > limit
+            ):
                 cancel_event = task.metadata.get("_cancel_event")
                 if cancel_event is not None:
                     cancel_event.set()
@@ -225,7 +236,9 @@ class ProviderRegistry:
                     source_workspace,
                     task_id,
                     budget_exceeded=True,
-                    budget_reason=f"token budget exceeded: {observed} > {limit}",
+                    budget_reason=(
+                        f"token budget exceeded: {observed_tokens} > {limit}"
+                    ),
                     current_activity="Token budget exceeded; cancellation requested",
                 )
 
