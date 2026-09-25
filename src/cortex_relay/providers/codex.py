@@ -198,6 +198,7 @@ class CodexAdapter(ProviderAdapter):
             provider=self.name,
             model=task.model,
             summary=str(payload.get("summary", "")).strip(),
+            final_text=str(payload.get("final_text", "")).strip(),
             evidence=tuple(
                 Evidence.from_dict(item)
                 for item in payload.get("evidence", [])
@@ -231,7 +232,10 @@ class CodexAdapter(ProviderAdapter):
             f"{access_instruction}\n\n"
             "Acceptance criteria:\n"
             f"{criteria}\n\n"
-            "Return compact evidence. Do not include long transcripts or unrelated findings. "
+            "Return structured output only. Keep summary compact, but put your COMPLETE answer "
+            "to the parent in final_text. Do not compress final_text into a synopsis; preserve all "
+            "material findings, conclusions, implementation details, caveats, and recommendations "
+            "needed to satisfy the objective. The remaining fields are machine-readable indexes. "
             "Your final answer must satisfy the output schema supplied by CortexRelay."
         )
 
