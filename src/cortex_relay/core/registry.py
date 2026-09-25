@@ -23,6 +23,7 @@ from cortex_relay.providers.opencode import OpenCodeAdapter
 from cortex_relay.observability import RunStore, summarize_usage
 from cortex_relay.runtime.artifacts import ArtifactStore
 from cortex_relay.runtime.progress import normalize_progress
+from cortex_relay.runtime.supervision import SupervisionTracker
 from cortex_relay.runtime.worktree import WorktreeManager
 
 
@@ -364,12 +365,7 @@ class ProviderRegistry:
         if cancel_event is None:
             cancel_event = threading.Event()
             metadata["_cancel_event"] = cancel_event
-        supervision: dict[str, Any] = {
-            "tool_calls": 0,
-            "last_tool_fingerprint": None,
-            "repeated_calls": 0,
-            "child_ids": set(),
-        }
+        supervision = SupervisionTracker(task.budget)
 
         def trip_budget(reason: str, activity: str) -> None:
             if hasattr(cancel_event, "set"):
@@ -403,81 +399,15 @@ class ProviderRegistry:
             if event is None:
                 return
             self.run_store.record_progress(source_workspace, event)
-
-            if event.phase == "tool" and event.state == "active":
-                supervision["tool_calls"] = int(supervision["tool_calls"]) + 1
-                fingerprint = (
-                    str(event.tool or ""),
-                    str(event.command or ""),
-                    str(event.path or ""),
-                )
-                if fingerprint == supervision["last_tool_fingerprint"]:
-                    supervision["repeated_calls"] = int(supervision["repeated_calls"]) + 1
-                else:
-                    supervision["last_tool_fingerprint"] = fingerprint
-                    supervision["repeated_calls"] = 1
-
-                max_tool_calls = task.budget.max_tool_calls
-                if (
-                    max_tool_calls is not None
-                    and int(supervision["tool_calls"]) > max_tool_calls
-                ):
-                    trip_budget(
-                        f"tool-call budget exceeded: {supervision['tool_calls']} > {max_tool_calls}",
-                        "Tool-call budget exceeded; cancellation requested",
-                    )
-
-                max_repeated = task.budget.max_repeated_calls
-                if (
-                    max_repeated is not None
-                    and int(supervision["repeated_calls"]) > max_repeated
-                ):
-                    trip_budget(
-                        "repeated tool-call budget exceeded: "
-                        f"{supervision['repeated_calls']} > {max_repeated}; "
-                        f"fingerprint={fingerprint!r}",
-                        "Repeated tool-call stall detected; cancellation requested",
-                    )
-
-            child_ids = supervision["child_ids"]
-            if isinstance(child_ids, set):
-                for child in event.subagents:
-                    if not isinstance(child, dict):
-                        continue
-                    child_id = (
-                        child.get("provider_session_id")
-                        or child.get("session_id")
-                        or child.get("id")
-                    )
-                    if child_id:
-                        child_ids.add(str(child_id))
-                max_children = task.budget.max_child_agents
-                if max_children is not None and len(child_ids) > max_children:
-                    trip_budget(
-                        f"child-agent budget exceeded: {len(child_ids)} > {max_children}",
-                        "Child-agent budget exceeded; cancellation requested",
-                    )
+            violation = supervision.observe(event)
+            if violation is not None:
+                trip_budget(violation.reason, violation.activity)
 
             if callable(external_progress):
                 try:
                     external_progress(event)
                 except Exception:
                     pass
-            limit = task.budget.max_tokens
-            if limit is None:
-                return
-            observed = event.total_tokens
-            if observed is None:
-                observed = (
-                    (event.input_tokens or 0) + (event.output_tokens or 0)
-                    if event.input_tokens is not None or event.output_tokens is not None
-                    else None
-                )
-            if observed is not None and observed > limit:
-                trip_budget(
-                    f"token budget exceeded: {observed} > {limit}",
-                    "Token budget exceeded; cancellation requested",
-                )
 
         metadata["_progress_line"] = progress_line
         metadata["_progress_heartbeat"] = lambda pid, alive: self.run_store.record_heartbeat(
@@ -939,12 +869,7 @@ class ProviderRegistry:
             provider,
         )
 
-        supervision: dict[str, Any] = {
-            "tool_calls": 0,
-            "last_tool_fingerprint": None,
-            "repeated_calls": 0,
-            "child_ids": set(),
-        }
+        supervision = SupervisionTracker(task.budget)
 
         def trip_direct_budget(reason: str, activity: str) -> None:
             cancel_event = task.metadata.get("_cancel_event")
@@ -998,55 +923,9 @@ class ProviderRegistry:
 
             if semantic is None:
                 return
-            if semantic.phase == "tool" and semantic.state == "active":
-                supervision["tool_calls"] = int(supervision["tool_calls"]) + 1
-                fingerprint = (
-                    str(semantic.tool or ""),
-                    str(semantic.command or ""),
-                    str(semantic.path or ""),
-                )
-                if fingerprint == supervision["last_tool_fingerprint"]:
-                    supervision["repeated_calls"] = int(supervision["repeated_calls"]) + 1
-                else:
-                    supervision["last_tool_fingerprint"] = fingerprint
-                    supervision["repeated_calls"] = 1
-
-                max_tools = task.budget.max_tool_calls
-                if max_tools is not None and int(supervision["tool_calls"]) > max_tools:
-                    trip_direct_budget(
-                        f"tool-call budget exceeded: {supervision['tool_calls']} > {max_tools}",
-                        "Tool-call budget exceeded; cancellation requested",
-                    )
-                max_repeated = task.budget.max_repeated_calls
-                if (
-                    max_repeated is not None
-                    and int(supervision["repeated_calls"]) > max_repeated
-                ):
-                    trip_direct_budget(
-                        "repeated tool-call budget exceeded: "
-                        f"{supervision['repeated_calls']} > {max_repeated}; "
-                        f"fingerprint={fingerprint!r}",
-                        "Repeated tool-call stall detected; cancellation requested",
-                    )
-
-            child_ids = supervision["child_ids"]
-            if isinstance(child_ids, set):
-                for child in semantic.subagents:
-                    if not isinstance(child, dict):
-                        continue
-                    child_id = (
-                        child.get("provider_session_id")
-                        or child.get("session_id")
-                        or child.get("id")
-                    )
-                    if child_id:
-                        child_ids.add(str(child_id))
-                max_children = task.budget.max_child_agents
-                if max_children is not None and len(child_ids) > max_children:
-                    trip_direct_budget(
-                        f"child-agent budget exceeded: {len(child_ids)} > {max_children}",
-                        "Child-agent budget exceeded; cancellation requested",
-                    )
+            violation = supervision.observe(semantic)
+            if violation is not None:
+                trip_direct_budget(violation.reason, violation.activity)
 
         def progress_heartbeat(pid: int, alive: bool) -> None:
             try:
