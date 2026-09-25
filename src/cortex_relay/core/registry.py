@@ -35,13 +35,17 @@ class ProviderRegistry:
         worktrees: WorktreeManager | None = None,
         profiles: ProfileResolver | None = None,
         run_store: RunStore | None = None,
+        agent_store: AgentStore | None = None,
     ) -> None:
         self._providers: dict[str, ProviderAdapter] = {}
         self.policy = policy or RoutingPolicy()
         self.worktrees = worktrees or WorktreeManager()
         self.profiles = profiles or ProfileResolver()
         self.run_store = run_store or RunStore()
-        self.agent_store = AgentStore(self.run_store.root)
+        # Keep the backend injectable so a future multi-host implementation can
+        # provide the same AgentStore contract with PostgreSQL or another
+        # transactional coordinator. SQLite remains the default single-host store.
+        self.agent_store = agent_store or AgentStore(self.run_store.root)
         for provider in providers or []:
             self.register(provider)
 
