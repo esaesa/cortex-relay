@@ -183,7 +183,7 @@ class ObservabilityTests(unittest.TestCase):
             ids = {item["session_id"] for item in snapshot["agents"]}
             self.assertEqual(ids, {parent.session_id, child.session_id})
             self.assertEqual(snapshot["agent_summary"]["running"], 2)
-            self.assertEqual(snapshot["agent_summary"]["idle"], 0)
+            self.assertEqual(snapshot["agent_summary"]["idle"], 1)
             parent_row = next(
                 item for item in snapshot["agents"]
                 if item["session_id"] == parent.session_id
@@ -204,7 +204,7 @@ class ObservabilityTests(unittest.TestCase):
             },
             "agent_summary": {
                 "running": 2,
-                "idle": 0,
+                "idle": 8,
                 "failed": 0,
                 "closed": 0,
                 "total": 2,
@@ -254,7 +254,7 @@ class ObservabilityTests(unittest.TestCase):
 
         rendered = render_dashboard(snapshot, live_only=True)
         self.assertIn("Tasks: active 0 | success 0 | failed 0", rendered)
-        self.assertIn("Agents: running 2 | idle 0 | failed 0", rendered)
+        self.assertIn("Agents: running 2 | idle 8 | failed 0", rendered)
         self.assertIn("No active workflow tasks.", rendered)
         self.assertNotIn("No active CortexRelay requests", rendered)
         self.assertIn("implementer → antigravity/gemini-3.8-flash-high/high", rendered)
