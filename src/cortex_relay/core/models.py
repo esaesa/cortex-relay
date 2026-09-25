@@ -200,6 +200,7 @@ class TaskResult:
     status: TaskStatus
     provider: str
     summary: str
+    final_text: str = ""
     evidence: tuple[Evidence, ...] = ()
     changed_files: tuple[str, ...] = ()
     commands: tuple[str, ...] = ()
@@ -221,6 +222,7 @@ class TaskResult:
             "status": self.status,
             "provider": self.provider,
             "summary": self.summary,
+            "final_text": self.final_text,
             "evidence": [asdict(item) for item in self.evidence],
             "changed_files": list(self.changed_files),
             "commands": list(self.commands),
