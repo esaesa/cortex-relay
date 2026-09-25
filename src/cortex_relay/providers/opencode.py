@@ -21,7 +21,7 @@ from cortex_relay.runtime.process import (
 )
 from cortex_relay.runtime.progress import runner_progress_kwargs
 
-from .base import ProviderAdapter, ProviderCapabilities
+from .base import ProviderAdapter, ProviderCapabilities, task_execution_constraints
 from .result_schema import RESULT_SCHEMA
 
 
@@ -519,6 +519,7 @@ class OpenCodeAdapter(ProviderAdapter):
             f"{access_instruction}\n\n"
             "Acceptance criteria:\n"
             f"{criteria}\n\n"
+            f"{task_execution_constraints(task)}\n\n"
             "Return one JSON object and no markdown fences. Put a compact synopsis in summary, "
             "but put your COMPLETE answer to the parent in final_text. Do not shorten final_text "
             "merely to fit the summary; it must preserve all material findings, reasoning conclusions, "
