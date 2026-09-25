@@ -728,14 +728,18 @@ class AgentService:
             )
             supervision = SupervisionTracker(budget)
 
-            def trip_budget(reason: str, activity: str) -> None:
+            def trip_budget(
+                reason: str,
+                activity: str,
+                termination_reason: str,
+            ) -> None:
                 cancel_event.set()
                 self.store.merge_metadata(
                     session_id,
                     {
                         "budget_exceeded": True,
                         "budget_reason": reason,
-                        "termination_reason": "supervisor_budget",
+                        "termination_reason": termination_reason,
                         "current_activity": activity,
                     },
                 )
@@ -763,7 +767,11 @@ class AgentService:
                 self._renew_lease_on_progress(session_id)
                 violation = supervision.observe(semantic)
                 if violation is not None:
-                    trip_budget(violation.reason, violation.activity)
+                    trip_budget(
+                        violation.reason,
+                        violation.activity,
+                        violation.termination_reason,
+                    )
 
             effective_timeout = (
                 min(timeout_seconds, budget.max_runtime_seconds)
@@ -820,7 +828,10 @@ class AgentService:
                         latest_metadata.get("budget_reason")
                         or "agent follow-up supervision budget exceeded"
                     ),
-                    termination_reason="supervisor_budget",
+                    termination_reason=str(
+                        latest_metadata.get("termination_reason")
+                        or "supervisor_budget"
+                    ),
                 )
 
             if result.conversation_id:
