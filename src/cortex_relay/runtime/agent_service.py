@@ -5,6 +5,7 @@ import threading
 import time
 
 from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -261,11 +262,9 @@ class AgentService:
             parent_session_id=parent_session_id,
             on_started=on_started,
         )
-        task = TaskSpec(
-            **{
-                **task.__dict__,
-                "metadata": {**task.metadata, "_cancel_event": cancel_event},
-            }
+        task = replace(
+            task,
+            metadata={**task.metadata, "_cancel_event": cancel_event},
         )
         try:
             result = self.registry.start_agent(task)
@@ -591,10 +590,6 @@ class AgentService:
             raise ValueError(
                 f"agent session {session_id} is {session.state}; follow-up messages require an idle session"
             )
-        lease_owner = self._begin_lease(session_id)
-        cancel_event = threading.Event()
-        with self._lock:
-            self._cancel_events[session_id] = cancel_event
         provider = self.registry.provider(session.provider)
         capabilities = provider.capabilities()
         if not capabilities.persistent_sessions:
@@ -609,6 +604,11 @@ class AgentService:
             raise ValueError(
                 f"agent session {session_id} has no provider session handle yet"
             )
+
+        lease_owner = self._begin_lease(session_id)
+        cancel_event = threading.Event()
+        with self._lock:
+            self._cancel_events[session_id] = cancel_event
 
         try:
             self.store.add_message(
