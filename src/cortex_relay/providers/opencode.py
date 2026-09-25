@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -46,18 +47,28 @@ class OpenCodeAdapter(ProviderAdapter):
             read_only_policy=True,
             workspace_write=True,
             detail=path or f"{self.binary} was not found on PATH",
+            session_mode="native",
+            persistent_sessions=True,
+            streaming_events=True,
+            native_subagents=True,
+            child_messaging=False,
         )
 
     def command_for(self, task: TaskSpec) -> list[str]:
-        argv = [
-            self.binary,
-            "--pure",
+        native_session = bool(task.metadata.get("_opencode_session_mode"))
+        argv = [self.binary]
+        if not native_session:
+            argv.append("--pure")
+        argv.extend([
             "run",
             "--format",
             "json",
             "--dir",
             str(task.workspace),
-        ]
+        ])
+        provider_session_id = task.metadata.get("_resume_provider_session_id")
+        if native_session and isinstance(provider_session_id, str) and provider_session_id.strip():
+            argv.extend(["--session", provider_session_id.strip()])
         if task.model:
             argv.extend(["--model", task.model])
         if task.reasoning and task.reasoning != "default":
@@ -68,7 +79,7 @@ class OpenCodeAdapter(ProviderAdapter):
         if isinstance(agent, str) and agent.strip():
             argv.extend(["--agent", agent.strip()])
 
-        argv.append(self._prompt(task))
+        argv.append(self._prompt(task, allow_subagents=native_session))
         return argv
 
     def host_command(self, task: TaskSpec) -> list[str]:
@@ -179,6 +190,26 @@ class OpenCodeAdapter(ProviderAdapter):
             )
             return completed.returncode
 
+    def execute_session(self, task: TaskSpec) -> TaskResult:
+        return self.execute(
+            replace(
+                task,
+                metadata={**task.metadata, "_opencode_session_mode": True},
+            )
+        )
+
+    def continue_session(self, task: TaskSpec, provider_session_id: str) -> TaskResult:
+        return self.execute(
+            replace(
+                task,
+                metadata={
+                    **task.metadata,
+                    "_opencode_session_mode": True,
+                    "_resume_provider_session_id": provider_session_id,
+                },
+            )
+        )
+
     def execute(self, task: TaskSpec) -> TaskResult:
         capabilities = self.capabilities()
         if not capabilities.available:
@@ -214,7 +245,10 @@ class OpenCodeAdapter(ProviderAdapter):
         env = dict(os.environ)
         env["OPENCODE_CLIENT"] = "cortex-relay"
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
-            self._runtime_config(task),
+            self._runtime_config(
+                task,
+                allow_subagents=bool(task.metadata.get("_opencode_session_mode")),
+            ),
             separators=(",", ":"),
         )
 
@@ -312,6 +346,11 @@ class OpenCodeAdapter(ProviderAdapter):
                 "stderr": result.stderr.strip(),
                 "event_count": len(events),
                 "runtime_permissions": "cortex-relay-inline",
+                "transport": (
+                    "session"
+                    if task.metadata.get("_opencode_session_mode")
+                    else "closed_end"
+                ),
             },
         )
 
@@ -372,7 +411,12 @@ class OpenCodeAdapter(ProviderAdapter):
             )
         return None
 
-    def _runtime_config(self, task: TaskSpec) -> dict[str, Any]:
+    def _runtime_config(
+        self,
+        task: TaskSpec,
+        *,
+        allow_subagents: bool = False,
+    ) -> dict[str, Any]:
         existing: dict[str, Any] = {}
         raw = os.environ.get("OPENCODE_CONFIG_CONTENT")
         if raw:
@@ -410,10 +454,18 @@ class OpenCodeAdapter(ProviderAdapter):
         if mcp_config:
             config["mcp"] = mcp_config
 
-        config["permission"] = _permission_policy(task.access)
+        config["permission"] = _permission_policy(
+            task.access,
+            allow_subagents=allow_subagents,
+        )
         return config
 
-    def _prompt(self, task: TaskSpec) -> str:
+    def _prompt(
+        self,
+        task: TaskSpec,
+        *,
+        allow_subagents: bool = False,
+    ) -> str:
         criteria = "\n".join(f"- {item}" for item in task.acceptance_criteria)
         if not criteria:
             criteria = "- Satisfy the objective exactly."
@@ -424,9 +476,16 @@ class OpenCodeAdapter(ProviderAdapter):
             else "You may modify files inside the active workspace only. Do not broaden scope."
         )
         schema = json.dumps(RESULT_SCHEMA, separators=(",", ":"))
+        delegation = (
+            "You may use OpenCode native subagents for useful bounded parallel work. "
+            "Their child sessions are observable by CortexRelay. Do not call CortexRelay MCP "
+            "from a child to recursively re-delegate the same task."
+            if allow_subagents
+            else "Do not delegate to subagents, MCP tools, or other external agents."
+        )
         return (
-            "You are a delegated CortexRelay worker. Do not delegate to subagents, MCP tools, "
-            "or other external agents.\n\n"
+            "You are a delegated CortexRelay worker. "
+            f"{delegation}\n\n"
             f"Role: {task.role}\n"
             f"Objective: {task.objective.strip()}\n"
             f"Access: {task.access}\n"
@@ -662,7 +721,11 @@ def _discover_configured_mcp_servers(workspace: Path | None = None) -> tuple[str
     return tuple(names)
 
 
-def _permission_policy(access: str) -> dict[str, Any]:
+def _permission_policy(
+    access: str,
+    *,
+    allow_subagents: bool = False,
+) -> dict[str, Any]:
     safe_bash = {
         "*": "ask",
         "git status*": "allow",
@@ -699,7 +762,7 @@ def _permission_policy(access: str) -> dict[str, Any]:
         "lsp": "allow",
         "edit": "deny" if access == "read_only" else "allow",
         "external_directory": "deny",
-        "task": "deny",
+        "task": "allow" if allow_subagents else "deny",
         "skill": "deny",
         "todowrite": "deny",
         "todoread": "deny",
