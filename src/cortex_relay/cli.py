@@ -663,6 +663,10 @@ def _launch(args: argparse.Namespace) -> int:
         "profile_options": dict(profile.options),
         "billing_class": profile.billing_class,
         "session_id": session_id,
+        # The interactive OpenCode host gets an isolated XDG state directory for
+        # its own model/variant state. Pin CortexRelay's durable control-plane
+        # state explicitly so the embedded MCP server cannot inherit that temp root.
+        "cortex_relay_state_dir": str(run_store.root),
     }
     contract = _orchestrator_contract(config, preset=args.preset)
     metadata["host_prompt"] = (
