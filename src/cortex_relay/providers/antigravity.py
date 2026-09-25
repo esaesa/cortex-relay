@@ -34,6 +34,11 @@ class AntigravityAdapter(ProviderAdapter):
             workspace_write=True,
             detail=path or f"{self.binary} was not found on PATH",
             reasoning_levels=("low", "medium", "high"),
+            session_mode="resumable",
+            persistent_sessions=True,
+            streaming_events=True,
+            native_subagents=True,
+            child_messaging=True,
         )
 
     def discover_models(self) -> dict[str, dict[str, Any]]:
@@ -104,7 +109,32 @@ class AntigravityAdapter(ProviderAdapter):
             argv.extend(["--effort", task.reasoning])
         if task.model:
             argv.extend(["--model", task.model])
+        resume_id = task.metadata.get("_resume_provider_session_id")
+        if isinstance(resume_id, str) and resume_id.strip():
+            argv.extend(["--conversation", resume_id.strip()])
         return argv
+
+    def continue_session(self, task: TaskSpec, provider_session_id: str) -> TaskResult:
+        metadata = dict(task.metadata)
+        metadata["_resume_provider_session_id"] = provider_session_id
+        return self.execute(TaskSpec(
+            objective=task.objective,
+            role=task.role,
+            profile=task.profile,
+            preset=task.preset,
+            provider=task.provider,
+            workspace=task.workspace,
+            access=task.access,
+            reasoning=task.reasoning,
+            model=task.model,
+            acceptance_criteria=task.acceptance_criteria,
+            timeout_seconds=task.timeout_seconds,
+            isolate_write=task.isolate_write,
+            context=task.context,
+            budget=task.budget,
+            quality_gates=task.quality_gates,
+            metadata=metadata,
+        ))
 
     def execute(self, task: TaskSpec) -> TaskResult:
         capabilities = self.capabilities()
