@@ -45,12 +45,12 @@ jobs:
           if [ "${status}" -eq 0 ]; then
             tail -n 3 unit-tests.log
           else
-            summary=$(grep -E '^(Ran |FAILED|OK)' unit-tests.log | tr '\n' ' ')
+            summary=$(grep -E '^(Ran |FAILED|OK)' unit-tests.log | tr -d '\r' | tr '\n' ' ')
             echo "::error title=unit tests exited ${status}::${summary:-no unittest summary line found}"
             grep -E '^(FAIL|ERROR):' unit-tests.log | head -n 4 | while IFS= read -r line; do
-              echo "::error title=unit test failure::${line}"
+              echo "::error title=unit test failure::${line%$'\r'}"
             done
-            tail_msg=$(tail -n 25 unit-tests.log | tr '\n' ' ' | cut -c1-3000)
+            tail_msg=$(tail -n 25 unit-tests.log | tr -d '\r' | tr '\n' ' ' | cut -c1-3000)
             echo "::error title=unit tests output tail::${tail_msg:-log is empty}"
             {
               echo "### unit tests failed (exit ${status})"
