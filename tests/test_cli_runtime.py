@@ -374,6 +374,8 @@ class CLIRuntimeTests(unittest.TestCase):
         )
         contract = _orchestrator_contract(config)
         self.assertIn("Prefer provider-native persistent agent sessions", contract)
+        self.assertIn("Use agent_start for direct specialists", contract)
+        self.assertIn("Use delegate/delegate_async for DAG scheduling", contract)
         self.assertIn("closed-end delegation only", contract)
         self.assertIn("Provider-native subagents are allowed", contract)
         self.assertIn("Every discovered child agent must be mirrored", contract)

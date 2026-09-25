@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +37,13 @@ class SessionProvider(ProviderAdapter):
         return self.execute_session(task)
 
     def execute_session(self, task: TaskSpec) -> TaskResult:
+        progress = task.metadata.get("_progress_line")
+        if callable(progress):
+            progress(
+                self.name,
+                json.dumps({"type": "provider.ping", "detail": "initial turn"}),
+                "stdout",
+            )
         return TaskResult(
             status="success",
             provider=self.name,
@@ -61,7 +69,94 @@ class SessionProvider(ProviderAdapter):
         )
 
 
+class ClosedEndProvider(ProviderAdapter):
+    name = "closed"
+
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            name=self.name,
+            binary="closed",
+            available=True,
+            structured_output=True,
+            model_selection=True,
+            reasoning_control=True,
+            read_only_policy=True,
+            workspace_write=True,
+            session_mode="closed_end",
+            persistent_sessions=False,
+        )
+
+    def execute(self, task: TaskSpec) -> TaskResult:
+        return TaskResult(
+            status="success",
+            provider=self.name,
+            summary="closed",
+            final_text="closed answer",
+        )
+
+
 class AgentServiceTests(unittest.TestCase):
+    def test_start_creates_direct_persistent_session_without_task_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            provider = SessionProvider()
+            registry = ProviderRegistry(
+                [provider],
+                run_store=RunStore(root / "state"),
+            )
+            service = AgentService(registry)
+
+            started = service.start(
+                objective="inspect",
+                provider="fake",
+                workspace=workspace,
+                timeout_seconds=60,
+            )
+
+            self.assertEqual(started["status"], "success")
+            self.assertEqual(started["final_text"], "initial full answer")
+            self.assertIn("agent_session_id", started)
+            session_id = started["agent_session_id"]
+            session = service.get(session_id)
+            self.assertIsNone(session["task_id"])
+            self.assertEqual(session["provider_session_id"], "provider-session-1")
+            self.assertEqual(session["state"], "idle")
+            self.assertEqual(registry.run_store.indexed_task_ids(), [])
+
+            messages = service.messages(session_id)
+            self.assertEqual(messages[0]["direction"], "host_to_agent")
+            self.assertEqual(messages[0]["content"], "inspect")
+            self.assertEqual(messages[-1]["direction"], "agent_to_host")
+
+            events = service.events(session_id)["events"]
+            self.assertTrue(events)
+            self.assertEqual(events[0]["kind"], "provider_event")
+
+    def test_start_rejects_closed_end_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            registry = ProviderRegistry(
+                [ClosedEndProvider()],
+                run_store=RunStore(root / "state"),
+            )
+            service = AgentService(registry)
+
+            started = service.start(
+                objective="inspect",
+                provider="closed",
+                workspace=workspace,
+            )
+
+            self.assertEqual(started["status"], "unavailable")
+            self.assertIn("persistent agent sessions", started["summary"])
+            self.assertIn("delegate/delegate_async", started["error"])
+            self.assertNotIn("agent_session_id", started)
+            self.assertEqual(registry.run_store.indexed_task_ids(), [])
+
     def test_followup_reuses_provider_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

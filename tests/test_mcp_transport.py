@@ -83,6 +83,7 @@ class MCPTransportMappingTests(unittest.TestCase):
             raise
         self.assertIn("cross-provider agent control plane", server.instructions)
         self.assertIn("persistent provider-native agent sessions", server.instructions)
+        self.assertIn("Use agent_start for direct resumable specialists", server.instructions)
         self.assertIn("closed-end execution", server.instructions)
         self.assertIn("provider-native child", server.instructions)
         self.assertIn("complete worker final result is authoritative", server.instructions)
@@ -97,6 +98,11 @@ class MCPTransportMappingTests(unittest.TestCase):
             t for t in server._tool_manager.list_tools() if t.name == "task_output"
         )
         self.assertIn("complete child final answer", output_tool.description)
+        agent_start_tool = next(
+            t for t in server._tool_manager.list_tools() if t.name == "agent_start"
+        )
+        self.assertIn("direct persistent/resumable agent session", agent_start_tool.description)
+        self.assertIn("Closed-end providers are rejected", agent_start_tool.description)
         agent_events_tool = next(
             t for t in server._tool_manager.list_tools() if t.name == "agent_events"
         )
