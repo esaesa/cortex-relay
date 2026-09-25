@@ -499,7 +499,15 @@ def _dict(value: Any) -> dict[str, Any]:
 
 def _message(value: Any) -> Any:
     if isinstance(value, dict):
-        return value.get("message") or value.get("text") or value.get("output")
+        for key in ("message", "text", "output", "detail"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+        for key in ("error", "data"):
+            nested = _message(value.get(key))
+            if nested:
+                return nested
+        return None
     return value
 
 
