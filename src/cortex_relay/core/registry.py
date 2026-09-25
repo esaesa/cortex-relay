@@ -218,6 +218,37 @@ class ProviderRegistry:
         )
         return result
 
+    def continue_provider_session(
+        self,
+        provider: ProviderAdapter,
+        task: TaskSpec,
+        provider_session_id: str,
+    ) -> TaskResult:
+        """Continue a durable provider session while feeding runtime health."""
+        started = time.monotonic()
+        try:
+            result = provider.continue_session(task, provider_session_id)
+        except Exception:
+            synthetic = TaskResult(
+                status="error",
+                provider=provider.name,
+                model=task.model,
+                summary="Provider continuation raised before returning a normalized result.",
+                termination_reason="provider_exception",
+            )
+            self._record_provider_health(
+                provider.name,
+                synthetic,
+                time.monotonic() - started,
+            )
+            raise
+        self._record_provider_health(
+            provider.name,
+            result,
+            time.monotonic() - started,
+        )
+        return result
+
     def profile_config(
         self,
         workspace,
