@@ -236,6 +236,13 @@ class AgentService:
         parent_session_id: str | None = None,
     ) -> dict[str, Any]:
         """Start a direct persistent provider-backed agent session and await its first turn."""
+        holder: dict[str, str] = {}
+
+        def on_started(session_id: str) -> None:
+            owner_id = self._begin_lease(session_id)
+            holder["session_id"] = session_id
+            holder["owner_id"] = owner_id
+
         task = self._build_task(
             objective=objective,
             role=role,
@@ -248,8 +255,16 @@ class AgentService:
             model=model,
             timeout_seconds=timeout_seconds,
             parent_session_id=parent_session_id,
+            on_started=on_started,
         )
-        result = self.registry.start_agent(task)
+        try:
+            result = self.registry.start_agent(task)
+        finally:
+            session_id = holder.get("session_id")
+            owner_id = holder.get("owner_id")
+            if session_id and owner_id:
+                self._end_lease(session_id, owner_id)
+
         payload = result.to_dict()
         session_id = result.metadata.get("agent_session_id")
         if isinstance(session_id, str):
@@ -282,7 +297,15 @@ class AgentService:
         holder: dict[str, str] = {}
 
         def on_started(session_id: str) -> None:
+            try:
+                owner_id = self._begin_lease(session_id)
+            except Exception as exc:
+                holder["lease_error"] = str(exc)
+                holder["session_id"] = session_id
+                started.set()
+                return
             holder["session_id"] = session_id
+            holder["owner_id"] = owner_id
             started.set()
 
         task = self._build_task(
@@ -312,12 +335,18 @@ class AgentService:
                 return payload
 
         session_id = holder["session_id"]
+        lease_error = holder.get("lease_error")
+        if lease_error:
+            raise ValueError(lease_error)
+        owner_id = holder.get("owner_id")
         with self._lock:
             self._futures[session_id] = future
 
         def _forget(_future: Future[Any]) -> None:
             with self._lock:
                 self._futures.pop(session_id, None)
+            if owner_id:
+                self._end_lease(session_id, owner_id)
 
         future.add_done_callback(_forget)
         session = self.store.get(session_id).to_dict()
@@ -489,9 +518,14 @@ class AgentService:
         self,
         session_id: str,
         *,
+        after_sequence: int = 0,
         limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        return self.store.messages(session_id, limit=limit)
+    ) -> dict[str, Any]:
+        return self.store.message_page(
+            session_id,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
 
     def send(
         self,
@@ -503,6 +537,11 @@ class AgentService:
         if not message.strip():
             raise ValueError("message must not be empty")
         session = self.store.get(session_id)
+        if session.state != "idle":
+            raise ValueError(
+                f"agent session {session_id} is {session.state}; follow-up messages require an idle session"
+            )
+        lease_owner = self._begin_lease(session_id)
         provider = self.registry.provider(session.provider)
         capabilities = provider.capabilities()
         if not capabilities.persistent_sessions:
@@ -518,79 +557,88 @@ class AgentService:
                 f"agent session {session_id} has no provider session handle yet"
             )
 
-        self.store.add_message(
-            session_id,
-            direction="host_to_agent",
-            content=message,
-            recipient_session_id=session_id,
-        )
-        self.store.update(session_id, state="running")
-
-        def progress_line(
-            provider_name: str,
-            line: str,
-            stream: str = "stdout",
-        ) -> None:
-            for event in normalize_agent_events(
-                provider_name,
-                line,
-                session_id,
-                stream,
-            ):
-                try:
-                    self.registry.record_agent_event(provider_name, event)
-                except (OSError, ValueError):
-                    pass
-
-        task = TaskSpec(
-            objective=message,
-            role=session.role,
-            provider=session.provider,
-            workspace=session.workspace,
-            access=session.access,  # type: ignore[arg-type]
-            reasoning=session.reasoning,
-            model=session.model,
-            timeout_seconds=timeout_seconds,
-            isolate_write=False,
-            metadata={
-                "_agent_session_id": session_id,
-                "_progress_line": progress_line,
-                "_resume_provider_session_id": session.provider_session_id,
-            },
-        )
         try:
-            result = provider.continue_session(
-                task,
-                session.provider_session_id,
-            )
-        except Exception:
-            self.store.update(session_id, state="failed")
-            raise
-
-        if result.conversation_id:
-            self.store.bind_provider_session(
-                session_id,
-                result.conversation_id,
-            )
-        self.store.update(
-            session_id,
-            state="idle" if result.status == "success" else "failed",
-        )
-        if result.final_text:
             self.store.add_message(
                 session_id,
-                direction="agent_to_host",
-                content=result.final_text,
-                sender_session_id=session_id,
-                metadata={"final": True, "status": result.status},
+                direction="host_to_agent",
+                content=message,
+                recipient_session_id=session_id,
             )
-        payload = result.to_dict()
-        payload["agent_session_id"] = session_id
-        try:
+            self.store.update(session_id, state="running")
+
+            def progress_line(
+                provider_name: str,
+                line: str,
+                stream: str = "stdout",
+            ) -> None:
+                for event in normalize_agent_events(
+                    provider_name,
+                    line,
+                    session_id,
+                    stream,
+                ):
+                    self.registry.record_agent_event(provider_name, event)
+
+            task = TaskSpec(
+                objective=message,
+                role=session.role,
+                provider=session.provider,
+                workspace=session.workspace,
+                access=session.access,  # type: ignore[arg-type]
+                reasoning=session.reasoning,
+                model=session.model,
+                timeout_seconds=timeout_seconds,
+                isolate_write=False,
+                metadata={
+                    "_agent_session_id": session_id,
+                    "_progress_line": progress_line,
+                    "_resume_provider_session_id": session.provider_session_id,
+                },
+            )
+            try:
+                result = provider.continue_session(
+                    task,
+                    session.provider_session_id,
+                )
+            except Exception as exc:
+                self.store.save_result(
+                    session_id,
+                    {
+                        "status": "error",
+                        "provider": session.provider,
+                        "model": session.model,
+                        "summary": "Agent follow-up execution failed.",
+                        "final_text": "",
+                        "error": str(exc),
+                        "agent_session_id": session_id,
+                    },
+                )
+                self.store.update(session_id, state="failed")
+                raise
+
+            if result.conversation_id:
+                self.store.bind_provider_session(
+                    session_id,
+                    result.conversation_id,
+                )
+            if result.final_text:
+                self.store.add_message(
+                    session_id,
+                    direction="agent_to_host",
+                    content=result.final_text,
+                    sender_session_id=session_id,
+                    metadata={"final": True, "status": result.status},
+                )
+            payload = result.to_dict()
+            payload["agent_session_id"] = session_id
             self.store.save_result(session_id, payload)
-        except (OSError, ValueError):
-            pass
-        return payload
+            self.store.update(
+                session_id,
+                state="idle" if result.status == "success" else "failed",
+            )
+            return payload
+        finally:
+            self._end_lease(session_id, lease_owner)
 
     def close(self, session_id: str) -> dict[str, Any]:
         return self.store.close(session_id).to_dict()
