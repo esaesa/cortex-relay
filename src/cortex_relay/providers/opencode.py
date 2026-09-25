@@ -51,7 +51,7 @@ class OpenCodeAdapter(ProviderAdapter):
             persistent_sessions=True,
             streaming_events=True,
             native_subagents=True,
-            child_messaging=False,
+            child_messaging=True,
         )
 
     def command_for(self, task: TaskSpec) -> list[str]:
