@@ -332,6 +332,17 @@ class CodexAdapter(ProviderAdapter):
                     model=task.model,
                     summary="Codex task was cancelled.",
                     error="provider process cancelled",
+                    termination_reason="cancelled",
+                    duration_seconds=time.monotonic() - started,
+                )
+            except ProcessIdleTimeoutError as exc:
+                return TaskResult(
+                    status="timeout",
+                    provider=self.name,
+                    model=task.model,
+                    summary="Codex task stalled without provider progress.",
+                    error=f"idle timeout after {exc.idle_timeout_seconds:g} seconds",
+                    termination_reason="idle_timeout",
                     duration_seconds=time.monotonic() - started,
                 )
             except subprocess.TimeoutExpired:
@@ -341,6 +352,7 @@ class CodexAdapter(ProviderAdapter):
                     model=task.model,
                     summary="Codex task timed out.",
                     error=f"timeout after {task.timeout_seconds} seconds",
+                    termination_reason="execution_timeout",
                     duration_seconds=time.monotonic() - started,
                 )
 
