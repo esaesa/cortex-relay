@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 import warnings
+from unittest.mock import patch
 
 from pathlib import Path
 
@@ -48,6 +49,43 @@ class ProcessRunnerTests(unittest.TestCase):
                 )
         finally:
             timer.cancel()
+
+    def test_invalid_idle_timeout_never_spawns_process(self):
+        with patch("cortex_relay.runtime.process.subprocess.Popen") as popen:
+            with self.assertRaisesRegex(ValueError, "idle_timeout_seconds"):
+                ProcessRunner().run(
+                    [sys.executable, "-c", "pass"],
+                    cwd=Path.cwd(), timeout_seconds=5, idle_timeout_seconds=0,
+                )
+            popen.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group cancellation")
+    def test_cancel_terminates_process_descendants(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "child-finished.txt"
+            child = (
+                "import sys,time;time.sleep(1.1);"
+                "open(sys.argv[1],'w').write('child-finished')"
+            )
+            parent = (
+                "import subprocess,sys,time;"
+                "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]);"
+                "print('started',flush=True);time.sleep(30)"
+            )
+            cancel = threading.Event()
+            timer = threading.Timer(0.3, cancel.set)
+            timer.start()
+            try:
+                with self.assertRaises(ProcessCancelledError):
+                    ProcessRunner().run(
+                        [sys.executable, "-c", parent, child, str(marker)],
+                        cwd=Path.cwd(), timeout_seconds=5, cancel_event=cancel,
+                    )
+            finally:
+                timer.cancel()
+            import time
+            time.sleep(1.3)
+            self.assertFalse(marker.exists(), "provider descendant outlived cancellation")
 
     def test_process_closes_pipe_wrappers(self):
         with warnings.catch_warnings(record=True) as caught:
