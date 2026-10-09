@@ -71,10 +71,10 @@ class TaskService:
         while not self._heartbeat_stop.wait(2):
             with self._lock:
                 jobs = [
-                    (task_id, job.workspace, job.cancel_event)
+                    (task_id, job.workspace, job.cancel_event, job.future)
                     for task_id, job in self._jobs.items()
                 ]
-            for task_id, workspace, cancel_event in jobs:
+            for task_id, workspace, cancel_event, future in jobs:
                 try:
                     record = self.store.get_task(workspace, task_id)
                     if record and record.get("cancel_requested") and not cancel_event.is_set():
@@ -82,8 +82,16 @@ class TaskService:
                     self.store.record_owner_heartbeat(
                         workspace, task_id, self.owner_instance_id
                     )
+                    if future is not None and not future.done():
+                        if not self.registry.agent_store.renew_scheduler_slot(
+                            task_id, self.owner_instance_id
+                        ):
+                            # A lost lease must not allow unbounded overlap.
+                            cancel_event.set()
                 except (OSError, ValueError):
                     continue
+            # Another process may have released capacity since our last check.
+            self._schedule_ready()
 
     def _resolve(self, task_id: str) -> tuple[Path, dict[str, Any]]:
         workspace, record = self.store.find_task(task_id)
