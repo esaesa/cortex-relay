@@ -68,11 +68,17 @@ class TaskService:
                 continue
 
     def _heartbeat_loop(self) -> None:
-        while not self._heartbeat_stop.wait(5):
+        while not self._heartbeat_stop.wait(2):
             with self._lock:
-                jobs = [(task_id, job.workspace) for task_id, job in self._jobs.items()]
-            for task_id, workspace in jobs:
+                jobs = [
+                    (task_id, job.workspace, job.cancel_event)
+                    for task_id, job in self._jobs.items()
+                ]
+            for task_id, workspace, cancel_event in jobs:
                 try:
+                    record = self.store.get_task(workspace, task_id)
+                    if record and record.get("cancel_requested") and not cancel_event.is_set():
+                        self.cancel(task_id)
                     self.store.record_owner_heartbeat(
                         workspace, task_id, self.owner_instance_id
                     )
@@ -746,12 +752,14 @@ class TaskService:
         with self._lock:
             job = self._jobs.get(task_id)
             if job is None:
-                return {
-                    **record,
-                    "cancel_status": (
-                        "owned_elsewhere" if record.get("async") else "owner_unknown"
-                    ),
-                }
+                if record.get("async"):
+                    request = self.store.request_cancel(workspace, task_id)
+                    return {
+                        **request,
+                        "cancel_status": "requested",
+                        "delivered": False,
+                    }
+                return {**record, "cancel_status": "owner_unknown"}
             finished = job.future is not None and job.future.done()
             future = job.future
             if not finished:
