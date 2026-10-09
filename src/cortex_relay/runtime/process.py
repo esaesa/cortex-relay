@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import queue
+import signal
 import shutil
 import subprocess
 import threading
@@ -114,6 +115,10 @@ class ProcessRunner:
         on_heartbeat: Callable[[int, bool], None] | None = None,
         idle_timeout_seconds: float | None = None,
     ) -> ProcessResult:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        if idle_timeout_seconds is not None and idle_timeout_seconds <= 0:
+            raise ValueError("idle_timeout_seconds must be positive")
         original_argv = list(argv)
         process_argv = prepare_process_argv(original_argv)
         process = subprocess.Popen(
@@ -126,6 +131,7 @@ class ProcessRunner:
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=os.name != "nt",
         )
         started = time.monotonic()
         self._heartbeat(on_heartbeat, process.pid, True)
@@ -183,8 +189,6 @@ class ProcessRunner:
         exited_at: float | None = None
         last_heartbeat = time.monotonic()
         last_progress = started
-        if idle_timeout_seconds is not None and idle_timeout_seconds <= 0:
-            raise ValueError("idle_timeout_seconds must be positive")
         try:
             while finished < 2:
                 if time.monotonic() - last_heartbeat >= 5:
@@ -261,27 +265,36 @@ class ProcessRunner:
 
     @staticmethod
     def _terminate(process: subprocess.Popen[str], *, communicating: bool = True) -> None:
-        if process.poll() is not None:
-            return
         if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
-                capture_output=True,
-                check=False,
-            )
+            if process.poll() is None:
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                    capture_output=True,
+                    check=False,
+                )
         else:
-            process.terminate()
+            # Kill the dedicated process group, including provider descendants.
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         try:
             if communicating:
                 process.communicate(timeout=5)
             else:
                 process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            process.kill()
-            if communicating:
-                try:
-                    process.communicate(timeout=2)
-                except subprocess.TimeoutExpired:
-                    pass
+            if os.name == "nt":
+                process.kill()
             else:
-                process.wait()
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                if communicating:
+                    process.communicate(timeout=2)
+                else:
+                    process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
