@@ -144,6 +144,43 @@ class WorkflowControlTests(unittest.TestCase):
             run_store=RunStore(state),
         )
 
+    def test_remote_controller_cancellation_reaches_task_owner(self):
+        class CancellableWorker(WorkflowProvider):
+            def __init__(self):
+                super().__init__()
+                self.started = threading.Event()
+
+            def execute(self, task):
+                self.started.set()
+                event = task.metadata.get("_cancel_event")
+                for _ in range(150):
+                    if event is not None and event.is_set():
+                        return TaskResult(
+                            status="cancelled", provider=self.name,
+                            summary="remote cancellation received",
+                        )
+                    time.sleep(0.04)
+                return TaskResult(status="success", provider=self.name, summary="no cancellation")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _init_repo(root)
+            worker = CancellableWorker()
+            owner = TaskService(self._registry(repo, root / "state", worker))
+            controller = TaskService(self._registry(repo, root / "state", worker))
+            try:
+                handle = owner.submit(TaskSpec(
+                    objective="keep running", role="tester", workspace=repo
+                ))
+                self.assertTrue(worker.started.wait(3))
+                requested = controller.cancel(handle["task_id"])
+                self.assertEqual(requested["cancel_status"], "requested")
+                result = _wait(owner, handle["task_id"], timeout=8)
+                self.assertEqual(result["status"], "cancelled")
+            finally:
+                controller.shutdown()
+                owner.shutdown()
+
     def test_cancel_completed_future_does_not_reenter_service_lock(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
