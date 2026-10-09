@@ -87,6 +87,35 @@ class ProcessRunnerTests(unittest.TestCase):
             time.sleep(1.3)
             self.assertFalse(marker.exists(), "provider descendant outlived cancellation")
 
+    @unittest.skipIf(os.name == "nt", "POSIX process-group cancellation")
+    def test_cancel_kills_descendant_ignoring_term(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "ignored-term.txt"
+            child = (
+                "import signal,sys,time;"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                "time.sleep(1.2);open(sys.argv[1],'w').write('orphan')"
+            )
+            parent = (
+                "import subprocess,sys,time;"
+                "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]]);"
+                "print('ready',flush=True);time.sleep(30)"
+            )
+            cancel = threading.Event()
+            timer = threading.Timer(0.35, cancel.set)
+            timer.start()
+            try:
+                with self.assertRaises(ProcessCancelledError):
+                    ProcessRunner().run(
+                        [sys.executable, "-c", parent, child, str(marker)],
+                        cwd=Path.cwd(), timeout_seconds=5, cancel_event=cancel,
+                    )
+            finally:
+                timer.cancel()
+            import time
+            time.sleep(1.3)
+            self.assertFalse(marker.exists())
+
     def test_process_closes_pipe_wrappers(self):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", ResourceWarning)
