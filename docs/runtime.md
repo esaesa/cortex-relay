@@ -138,9 +138,31 @@ Operational guarantees for direct sessions:
 - only one direct turn owner may hold a live session lease at a time;
 - the owner renews its lease while work is active;
 - a new runtime reconciles expired active leases to `interrupted` and emits a diagnostic event;
-- `agent_cancel` reaches the provider process/app-server when the current runtime owns the turn;
+- `agent_cancel` reaches the local owner immediately; another MCP process can persist a cancellation request, which the owning runtime picks up on its next lease poll;
 - `agent_close` rejects active sessions, and `agent_send` requires an idle session;
 - provider-native child activity without a correlatable child session ID is persisted as `untracked_child` and flags the parent session instead of disappearing.
+
+### Shared workflow capacity and cancellation
+
+Workflow scheduling reserves worker slots transactionally in the same SQLite/WAL
+state database. The workspace-wide maximum and configured provider/profile
+limits apply across multiple MCP processes using the same local state directory.
+The running owner renews reservations, completed tasks release them, and
+abandoned reservations expire after 30 seconds. Another process can persist
+a task cancellation request; the owner periodically reads the request and
+signals the running worker. A remote cancellation response describes a
+request, not proof that the task has already terminated.
+
+For isolated write tasks, changed-file and allowed-path quality gates inspect
+Git changes in the actual worktree, including untracked non-ignored files,
+instead of trusting the worker's reported changed-file list. If Git verification
+is unavailable, a configured file gate rejects the result.
+
+Known limits: concurrent group token/cost budgets still rely on recorded usage
+rather than cross-process pre-reservation. Worker-reported test results are
+not independently verified by the basic `require_tests` gate. A2A uses an
+in-memory protocol task store, so protocol task-state recovery is not yet
+guaranteed after an A2A server restart.
 
 The SQLite/WAL backend is intended for a robust single-host deployment. It must not be treated as a shared multi-replica database over a network filesystem; that topology requires an external transactional AgentStore backend.
 
