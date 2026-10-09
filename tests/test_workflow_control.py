@@ -3,6 +3,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from pathlib import Path
 
@@ -142,6 +143,31 @@ class WorkflowControlTests(unittest.TestCase):
             profiles=resolver,
             run_store=RunStore(state),
         )
+
+    def test_cancel_completed_future_does_not_reenter_service_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _init_repo(root)
+            service = TaskService(self._registry(repo, root / "state", WorkflowProvider()))
+            try:
+                submitted = service.submit(
+                    TaskSpec(objective="finish", role="tester", workspace=repo)
+                )
+                _wait(service, submitted["task_id"])
+                # Mimic a completion race after cancel reads nonterminal state.
+                with patch.object(service, "_resolve", return_value=(repo, {"status": "running"})):
+                    def inspect_status(_task_id):
+                        available = service._lock.acquire(blocking=False)
+                        if available:
+                            service._lock.release()
+                        self.assertTrue(available, "status called under _lock")
+                        return {"status": "success"}
+
+                    with patch.object(service, "status", side_effect=inspect_status):
+                        result = service.cancel(submitted["task_id"])
+                self.assertEqual(result["status"], "success")
+            finally:
+                service.shutdown()
 
     def test_dependency_can_inherit_exact_implementer_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
