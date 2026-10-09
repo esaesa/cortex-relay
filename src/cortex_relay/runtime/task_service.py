@@ -566,11 +566,17 @@ class TaskService:
                 ]
             )
         )
+        if gates.require_changed_files or gates.allowed_paths:
+            verified_files = self._verified_changed_files(result)
+            if verified_files is None:
+                failures.append("changed files cannot be verified from Git")
+            else:
+                observed_files = verified_files
         if gates.require_changed_files and not observed_files:
             failures.append("no changed files were observed")
         if gates.require_tests and not result.tests:
             failures.append("no test evidence was reported")
-        if gates.allowed_paths:
+        if gates.allowed_paths and verified_files is not None:
             for changed in observed_files:
                 normalized = changed.replace("\\", "/")
                 if not any(
