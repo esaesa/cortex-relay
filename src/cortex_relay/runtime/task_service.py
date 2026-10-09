@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import subprocess
 import threading
 
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, TimeoutError
@@ -623,6 +624,29 @@ class TaskService:
             usage=result.usage,
             metadata={**result.metadata, "quality_gate_failures": failures},
         )
+
+    @staticmethod
+    def _verified_changed_files(result: TaskResult) -> tuple[str, ...] | None:
+        """Return changes reported by Git from the isolated worktree."""
+        location = result.metadata.get("worktree_path")
+        base = result.metadata.get("worktree_base_commit")
+        if not isinstance(location, str) or not isinstance(base, str):
+            return None
+        root = Path(location).expanduser().resolve()
+        if not root.is_dir() or not re.fullmatch(r"[0-9a-f]{40,64}", base):
+            return None
+        changed = set()
+        for cmd in (
+            ["git", "diff", "--name-only", base],
+            ["git", "ls-files", "--others", "--exclude-standard"],
+        ):
+            try:
+                cp = subprocess.run(cmd, cwd=root, capture_output=True,
+                                    text=True, check=True)
+            except (OSError, subprocess.CalledProcessError):
+                return None
+            changed.update(line.replace("\\", "/") for line in cp.stdout.splitlines())
+        return tuple(sorted(changed))
 
     @staticmethod
     def _cancelled_result(task: TaskSpec) -> TaskResult:
