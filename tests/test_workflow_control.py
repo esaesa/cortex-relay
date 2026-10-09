@@ -110,7 +110,7 @@ def _wait(service: TaskService, task_id: str, timeout: float = 10) -> dict:
 
 
 class WorkflowControlTests(unittest.TestCase):
-    def _registry(self, repo: Path, state: Path, provider: WorkflowProvider):
+    def _registry(self, repo: Path, state: Path, provider: WorkflowProvider, *, max_workers: int = 2):
         resolver = StaticResolver(
             {
                 "profiles": {
@@ -126,7 +126,7 @@ class WorkflowControlTests(unittest.TestCase):
                     "reviewer": "worker",
                 },
                 "scheduler": {
-                    "max_workers": 2,
+                    "max_workers": max_workers,
                     "providers": {"fake": 2},
                 },
                 "budgets": {"max_group_tokens": 10000},
@@ -143,6 +143,56 @@ class WorkflowControlTests(unittest.TestCase):
             profiles=resolver,
             run_store=RunStore(state),
         )
+
+    def test_shared_scheduler_never_exceeds_global_worker_limit(self):
+        class PausedWorker(WorkflowProvider):
+            def __init__(self):
+                super().__init__()
+                self.release = threading.Event()
+                self.started = threading.Event()
+                self.running = 0
+                self.peak = 0
+                self.lock = threading.Lock()
+
+            def execute(self, task):
+                with self.lock:
+                    self.running += 1
+                    self.peak = max(self.peak, self.running)
+                self.started.set()
+                self.release.wait(5)
+                with self.lock:
+                    self.running -= 1
+                return TaskResult(status="success", provider=self.name, summary="done")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _init_repo(root)
+            worker = PausedWorker()
+            one = TaskService(self._registry(
+                repo, root / "state", worker, max_workers=1
+            ))
+            two = TaskService(self._registry(
+                repo, root / "state", worker, max_workers=1
+            ))
+            try:
+                first = one.submit(TaskSpec(
+                    objective="first", role="tester", workspace=repo
+                ))
+                self.assertTrue(worker.started.wait(3))
+                second = two.submit(TaskSpec(
+                    objective="second", role="tester", workspace=repo
+                ))
+                self.assertEqual(two.status(second["task_id"])["status"], "queued")
+                with worker.lock:
+                    self.assertEqual(worker.peak, 1)
+                worker.release.set()
+                self.assertEqual(_wait(one, first["task_id"])["status"], "success")
+                self.assertEqual(_wait(two, second["task_id"], timeout=8)["status"], "success")
+                self.assertEqual(worker.peak, 1)
+            finally:
+                worker.release.set()
+                two.shutdown()
+                one.shutdown()
 
     def test_remote_controller_cancellation_reaches_task_owner(self):
         class CancellableWorker(WorkflowProvider):
