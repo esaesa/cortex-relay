@@ -259,7 +259,7 @@ class TaskService:
         )
 
     def _schedule_ready(self) -> None:
-        callbacks: list[Future[TaskResult]] = []
+        callbacks: list[tuple[str, Future[TaskResult]]] = []
         with self._lock:
             if self._closed:
                 return
@@ -393,21 +393,62 @@ class TaskService:
                         inherited_artifact_id=artifact["artifact_id"],
                     )
 
-                self.store.update_task(
-                    job.workspace,
-                    task_id,
-                    status="routing",
-                    queue_position=None,
-                    queued_reason=None,
-                )
-                job.future = self.executor.submit(
-                    self._run, prepared, job.cancel_event
-                )
-                running.append((task_id, job))
-                callbacks.append(job.future)
+                if not self._reserve_scheduler_slot(task_id, job):
+                    queue_position += 1
+                    self.store.update_task(
+                        job.workspace, task_id, status="queued",
+                        queue_position=queue_position,
+                        queued_reason="shared scheduler capacity exhausted",
+                    )
+                    continue
 
-        for future in callbacks:
-            future.add_done_callback(lambda _: self._schedule_ready())
+                try:
+                    self.store.update_task(
+                        job.workspace,
+                        task_id,
+                        status="routing",
+                        queue_position=None,
+                        queued_reason=None,
+                    )
+                    job.future = self.executor.submit(
+                        self._run, prepared, job.cancel_event
+                    )
+                except Exception:
+                    self.registry.agent_store.release_scheduler_slot(
+                        task_id, self.owner_instance_id
+                    )
+                    raise
+                running.append((task_id, job))
+                callbacks.append((task_id, job.future))
+
+        for task_id, future in callbacks:
+            future.add_done_callback(
+                lambda _future, tid=task_id: self._task_finished(tid)
+            )
+
+    def _reserve_scheduler_slot(self, task_id: str, job: _Job) -> bool:
+        config = self.registry.profiles.load(job.workspace)
+        provider, profile = self._resource_for(job.task)
+        return self.registry.agent_store.reserve_scheduler_slot(
+            task_id=task_id,
+            workspace=job.workspace,
+            owner_id=self.owner_instance_id,
+            provider=provider or "",
+            profile=profile or "",
+            max_workers=config.scheduler.max_workers,
+            provider_limit=config.scheduler.provider_limits.get(provider)
+                if provider else None,
+            profile_limit=config.scheduler.profile_limits.get(profile)
+                if profile else None,
+        )
+
+    def _task_finished(self, task_id: str) -> None:
+        try:
+            self.registry.agent_store.release_scheduler_slot(
+                task_id, self.owner_instance_id
+            )
+        finally:
+            self._schedule_ready()
 
     def _scheduler_allows(
         self, job: _Job, running: list[tuple[str, _Job]]
