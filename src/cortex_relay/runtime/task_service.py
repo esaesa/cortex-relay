@@ -696,17 +696,21 @@ class TaskService:
         root = Path(location).expanduser().resolve()
         if not root.is_dir() or not re.fullmatch(r"[0-9a-f]{40,64}", base):
             return None
-        changed = set()
+        changed: set[str] = set()
         for cmd in (
-            ["git", "diff", "--name-only", base],
-            ["git", "ls-files", "--others", "--exclude-standard"],
+            ["git", "diff", "--name-only", "-z", base, "--"],
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
         ):
             try:
-                cp = subprocess.run(cmd, cwd=root, capture_output=True,
-                                    text=True, check=True)
+                cp = subprocess.run(
+                    cmd, cwd=root, capture_output=True, check=True
+                )
             except (OSError, subprocess.CalledProcessError):
                 return None
-            changed.update(line.replace("\\", "/") for line in cp.stdout.splitlines())
+            changed.update(
+                name.decode("utf-8", "surrogateescape").replace("\\", "/")
+                for name in cp.stdout.split(bytes([0])) if name
+            )
         return tuple(sorted(changed))
 
     @staticmethod
