@@ -722,14 +722,17 @@ class TaskService:
                         "owned_elsewhere" if record.get("async") else "owner_unknown"
                     ),
                 }
-            if job.future is not None and job.future.done():
-                return self.status(task_id)
-            job.cancel_event.set()
+            finished = job.future is not None and job.future.done()
             future = job.future
-            if future is None:
-                cancelled_result = self._cancelled_result(job.task)
-                self.store.complete_task(workspace, task_id, cancelled_result)
-                job.result = cancelled_result
+            if not finished:
+                job.cancel_event.set()
+                if future is None:
+                    cancelled_result = self._cancelled_result(job.task)
+                    self.store.complete_task(workspace, task_id, cancelled_result)
+                    job.result = cancelled_result
+        # status() acquires _lock and must not run inside its critical section.
+        if finished:
+            return self.status(task_id)
         if future is not None:
             if future.cancel():
                 cancelled_result = self._cancelled_result(job.task)
