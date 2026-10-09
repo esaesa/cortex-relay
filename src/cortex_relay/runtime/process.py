@@ -5,6 +5,7 @@ import queue
 import signal
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -160,7 +161,13 @@ class ProcessRunner:
         idle_timeout_seconds: float | None,
     ) -> ProcessResult:
         events: queue.Queue[tuple[str, str | None]] = queue.Queue()
-        output: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        # Spill large output to disk while retaining lossless provider results.
+        output = {
+            name: tempfile.SpooledTemporaryFile(
+                mode="w+t", max_size=1024 * 1024, encoding="utf-8"
+            )
+            for name in ("stdout", "stderr")
+        }
 
         def read_pipe(name: str) -> None:
             pipe = process.stdout if name == "stdout" else process.stderr
@@ -216,7 +223,7 @@ class ProcessRunner:
                 if line is None:
                     finished += 1
                     continue
-                output[name].append(line)
+                output[name].write(line)
                 last_progress = time.monotonic()
                 callback = on_stdout_line if name == "stdout" else on_stderr_line
                 if callback is not None:
@@ -243,9 +250,11 @@ class ProcessRunner:
                     process.wait(timeout=min(0.2, remaining))
                 except subprocess.TimeoutExpired:
                     continue
+            output["stdout"].seek(0)
+            output["stderr"].seek(0)
             return ProcessResult(
                 argv=tuple(argv), returncode=process.returncode,
-                stdout="".join(output["stdout"]), stderr="".join(output["stderr"]),
+                stdout=output["stdout"].read(), stderr=output["stderr"].read(),
             )
         except (ProcessCancelledError, subprocess.TimeoutExpired):
             self._terminate(process, communicating=False)
@@ -254,6 +263,8 @@ class ProcessRunner:
             self._heartbeat(on_heartbeat, process.pid, False)
             for reader in readers:
                 reader.join(timeout=0.1)
+            for spool in output.values():
+                spool.close()
 
     @staticmethod
     def _heartbeat(callback: Callable[[int, bool], None] | None, pid: int, alive: bool) -> None:
