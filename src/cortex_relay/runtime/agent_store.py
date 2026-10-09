@@ -23,7 +23,7 @@ from cortex_relay.runtime.state_retry import (
 
 _ACTIVE_STATES = {"starting", "running"}
 _TERMINAL_STATES = {"idle", "interrupted", "failed", "closed"}
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 # SQLite already waits out short locks through ``busy_timeout``; this budget
 # only covers the residual cases (connection churn, WAL checkpoint contention)
@@ -238,14 +238,98 @@ class AgentStore:
 
                 CREATE INDEX IF NOT EXISTS idx_agent_leases_expiry
                 ON agent_leases(expires_at);
+
+                CREATE TABLE IF NOT EXISTS scheduler_reservations (
+                    task_id TEXT PRIMARY KEY,
+                    workspace TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    profile TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    expires_at REAL NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_scheduler_workspace
+                ON scheduler_reservations(workspace, expires_at);
                 """
             )
             # Version 0 is the unversioned schema shipped before migrations were
             # introduced. The CREATE IF NOT EXISTS statements above make that
             # schema compatible with v1, so the first open performs an in-place
             # migration by stamping the durable SQLite user_version.
-            if version == 0:
+            if version < _SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+
+    @_retryable_transaction()
+    def reserve_scheduler_slot(
+        self, *, task_id: str, workspace: Path, owner_id: str,
+        provider: str, profile: str, max_workers: int,
+        provider_limit: int | None = None,
+        profile_limit: int | None = None,
+        ttl_seconds: float = 30.0,
+    ) -> bool:
+        """Atomically enforce workspace/provider/profile quotas across processes."""
+        if max_workers < 1 or ttl_seconds <= 0:
+            raise ValueError("invalid scheduler capacity or lease")
+        now = time.time()
+        with self._connect() as conn:
+            self._begin(conn)
+            try:
+                conn.execute(
+                    "DELETE FROM scheduler_reservations WHERE expires_at <= ?", (now,)
+                )
+                rows = conn.execute(
+                    "SELECT task_id, provider, profile, owner_id "
+                    "FROM scheduler_reservations WHERE workspace = ?",
+                    (str(workspace.expanduser().resolve()),),
+                ).fetchall()
+                for row in rows:
+                    if row["task_id"] == task_id:
+                        owned = row["owner_id"] == owner_id
+                        conn.execute("COMMIT")
+                        return bool(owned)
+                limited = (
+                    len(rows) >= max_workers
+                    or (provider_limit is not None and
+                        sum(row["provider"] == provider for row in rows) >= provider_limit)
+                    or (profile_limit is not None and
+                        sum(row["profile"] == profile for row in rows) >= profile_limit)
+                )
+                if limited:
+                    conn.execute("ROLLBACK")
+                    return False
+                conn.execute(
+                    "INSERT INTO scheduler_reservations "
+                    "(task_id, workspace, provider, profile, owner_id, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (task_id, str(workspace.expanduser().resolve()),
+                     provider, profile, owner_id, now + ttl_seconds),
+                )
+                conn.execute("COMMIT")
+                return True
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+
+    def renew_scheduler_slot(
+        self, task_id: str, owner_id: str, ttl_seconds: float = 30.0
+    ) -> bool:
+        now = time.time()
+        with self._connect() as conn:
+            updated = conn.execute(
+                "UPDATE scheduler_reservations SET expires_at = ? "
+                "WHERE task_id = ? AND owner_id = ? AND expires_at > ?",
+                (now + ttl_seconds, task_id, owner_id, now),
+            )
+        return updated.rowcount == 1
+
+    def release_scheduler_slot(self, task_id: str, owner_id: str) -> bool:
+        with self._connect() as conn:
+            removed = conn.execute(
+                "DELETE FROM scheduler_reservations "
+                "WHERE task_id = ? AND owner_id = ?",
+                (task_id, owner_id),
+            )
+        return removed.rowcount == 1
 
     def schema_version(self) -> int:
         with self._connect() as conn:
