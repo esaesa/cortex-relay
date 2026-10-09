@@ -480,6 +480,40 @@ class AgentServiceTests(unittest.TestCase):
             self.assertNotIn("agent_session_id", started)
             self.assertEqual(registry.run_store.indexed_task_ids(), [])
 
+    def test_direct_agent_remote_cancel_is_delivered_to_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            provider = CancellableSessionProvider()
+            owner = AgentService(
+                ProviderRegistry([provider], run_store=RunStore(root / "state")),
+                lease_ttl_seconds=2, lease_heartbeat_seconds=0.1,
+            )
+            controller = AgentService(
+                ProviderRegistry([provider], run_store=RunStore(root / "state")),
+                lease_ttl_seconds=2, lease_heartbeat_seconds=0.1,
+            )
+            try:
+                started = owner.start_async(
+                    objective="remote cancel test",
+                    provider="fake", workspace=workspace, timeout_seconds=30,
+                )
+                session_id = started["agent_session_id"]
+                request = controller.cancel(session_id)
+                self.assertTrue(request["cancel_requested"])
+                self.assertFalse(request["delivered"])
+                result = owner.wait(session_id, timeout_seconds=5)
+                self.assertTrue(result["complete"])
+                self.assertEqual(result["result"]["status"], "cancelled")
+                self.assertEqual(
+                    owner.store.get(session_id).metadata["cancel_delivery"],
+                    "delivered_to_owner",
+                )
+            finally:
+                controller.shutdown()
+                owner.shutdown()
+
     def test_cancel_interrupts_active_provider_turn(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
