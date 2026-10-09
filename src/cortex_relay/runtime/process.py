@@ -309,3 +309,10 @@ class ProcessRunner:
                     process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 pass
+        finally:
+            if os.name != "nt":
+                # A child may ignore SIGTERM even after its parent exits.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
