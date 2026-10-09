@@ -25,12 +25,8 @@ def normalize_agent_events(
         if not text:
             return ()
         return (
-            AgentEvent(
-                session_id=session_id,
-                kind="diagnostic",
-                data={"stream": "stderr", "text": text[:4000]},
-                provider_event="stderr",
-            ),
+            _event(session_id, "diagnostic",
+                   {"stream": "stderr", "text": text[:4000]}, "stderr"),
         )
 
     try:
@@ -47,12 +43,8 @@ def normalize_agent_events(
     if provider == "opencode":
         return _opencode(event, session_id)
     return (
-        AgentEvent(
-            session_id=session_id,
-            kind="provider_event",
-            data={"event": event},
-            provider_event=str(event.get("type") or event.get("event") or "unknown"),
-        ),
+        _event(session_id, "provider_event", {"event": event},
+               str(event.get("type") or event.get("event") or "unknown")),
     )
 
 
