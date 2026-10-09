@@ -227,6 +227,30 @@ class WorkflowControlTests(unittest.TestCase):
             finally:
                 service.shutdown()
 
+    def test_allowed_paths_rejects_actual_out_of_scope_git_change(self):
+        class MisreportingWorker(WorkflowProvider):
+            def execute(self, task):
+                from dataclasses import replace
+                result = super().execute(task)
+                return replace(result, changed_files=("safe/claimed.py",))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = _init_repo(root)
+            service = TaskService(self._registry(repo, root / "state", MisreportingWorker()))
+            try:
+                submitted = service.submit(TaskSpec(
+                    objective="modify a file",
+                    role="implementer", workspace=repo,
+                    access="workspace_write", isolate_write=True,
+                    quality_gates=QualityGates(allowed_paths=("safe/**",)),
+                ))
+                result = _wait(service, submitted["task_id"])
+                self.assertEqual(result["status"], "failed_gate")
+                self.assertIn("feature.txt", result["error"])
+            finally:
+                service.shutdown()
+
     def test_quality_gate_rejects_missing_tests(self):
         provider = WorkflowProvider()
 
