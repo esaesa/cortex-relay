@@ -33,12 +33,35 @@ class AgentStoreTests(unittest.TestCase):
     def test_schema_version_and_integrity_are_reported(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = AgentStore(Path(tmp) / "state")
-            self.assertEqual(store.schema_version(), 1)
+            self.assertEqual(store.schema_version(), 2)
             self.assertEqual(store.integrity_check(), ("ok",))
             health = store.health()
             self.assertTrue(health["ok"])
-            self.assertEqual(health["schema_version"], 1)
-            self.assertEqual(health["expected_schema_version"], 1)
+            self.assertEqual(health["schema_version"], 2)
+            self.assertEqual(health["expected_schema_version"], 2)
+
+    def test_scheduler_slots_enforce_global_workspace_capacity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            one = AgentStore(root / "state")
+            two = AgentStore(root / "state")
+            args = {
+                "workspace": root,
+                "provider": "fake",
+                "profile": "worker",
+                "max_workers": 1,
+            }
+            self.assertTrue(one.reserve_scheduler_slot(
+                task_id="task-one", owner_id="owner-one", **args
+            ))
+            self.assertFalse(two.reserve_scheduler_slot(
+                task_id="task-two", owner_id="owner-two", **args
+            ))
+            self.assertTrue(one.renew_scheduler_slot("task-one", "owner-one"))
+            self.assertTrue(one.release_scheduler_slot("task-one", "owner-one"))
+            self.assertTrue(two.reserve_scheduler_slot(
+                task_id="task-two", owner_id="owner-two", **args
+            ))
 
     def test_session_events_messages_and_children_are_durable(self):
         with tempfile.TemporaryDirectory() as tmp:
