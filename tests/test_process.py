@@ -106,6 +106,15 @@ class ProcessRunnerTests(unittest.TestCase):
         ]
         self.assertEqual(leaked, [])
 
+    def test_large_output_remains_complete_when_spooled(self):
+        data_size = 1200000
+        result = ProcessRunner().run(
+            [sys.executable, "-c", "print('x' * 1200000)"],
+            cwd=Path.cwd(), timeout_seconds=10,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(result.stdout.strip()), data_size)
+
     def test_process_returns_output(self):
         result = ProcessRunner().run(
             [sys.executable, "-c", "print('ok')"],
