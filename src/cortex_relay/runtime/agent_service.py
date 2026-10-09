@@ -64,6 +64,11 @@ class AgentService:
 
     def shutdown(self, *, wait: bool = True) -> None:
         """Release direct-agent worker threads and durable leases."""
+        # Request cancellation before waiting for worker threads to exit.
+        with self._lock:
+            active = list(self._cancel_events.values())
+        for event in active:
+            event.set()
         self.executor.shutdown(wait=wait, cancel_futures=True)
         self._lease_shutdown.set()
         self._lease_thread.join(timeout=max(1.0, self._lease_heartbeat_seconds * 2))
@@ -93,6 +98,20 @@ class AgentService:
                     with self._lock:
                         if self._lease_owners.get(session_id) == owner_id:
                             self._lease_owners.pop(session_id, None)
+                    continue
+                # A different MCP process can issue a durable cancellation.
+                try:
+                    requested = self.store.get(session_id).metadata.get("cancel_requested")
+                    if requested:
+                        with self._lock:
+                            cancel_event = self._cancel_events.get(session_id)
+                        if cancel_event is not None:
+                            cancel_event.set()
+                            self.store.merge_metadata(
+                                session_id, {"cancel_delivery": "delivered_to_owner"}
+                            )
+                except (OSError, ValueError):
+                    pass
 
     def _renew_lease_on_progress(self, session_id: str) -> None:
         """Refresh durable ownership when the provider emits meaningful progress."""
@@ -888,10 +907,10 @@ class AgentService:
         with self._lock:
             cancel_event = self._cancel_events.get(session_id)
         if cancel_event is None:
-            metadata = dict(session.metadata)
-            metadata["cancel_requested"] = True
-            metadata["cancel_delivery"] = "unavailable_after_runtime_restart"
-            self.store.update(session_id, metadata=metadata)
+            self.store.merge_metadata(session_id, {
+                "cancel_requested": True,
+                "cancel_delivery": "awaiting_owner",
+            })
             return {
                 "agent_session_id": session_id,
                 "status": session.state,
