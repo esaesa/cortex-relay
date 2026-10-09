@@ -519,6 +519,23 @@ class RunStore:
             raise ValueError("invalid owner instance id")
         return self.root / "owners" / f"{owner_instance_id}.lock"
 
+    @_task_locked
+    def request_cancel(self, workspace: Path, task_id: str) -> dict[str, Any]:
+        """Persist a cancellation command for the process owning an async task."""
+        path = self._task_path(workspace, task_id)
+        record = self._read_record(path)
+        if not record or record.get("task_id") != task_id:
+            raise ValueError(f"unknown task id: {task_id}")
+        if record.get("status") in TERMINAL_STATUSES:
+            return record
+        record.update(
+            cancel_requested=True,
+            cancel_requested_at=_utc_now(),
+            current_activity="Cancellation requested from another process",
+        )
+        self._write_record(path, record, required=True)
+        return record
+
     @_task_locked(required=False)
     def record_owner_heartbeat(self, workspace: Path, task_id: str, owner_instance_id: str) -> None:
         path = self._task_path(workspace, task_id)
