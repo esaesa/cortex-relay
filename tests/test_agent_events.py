@@ -5,6 +5,25 @@ from cortex_relay.runtime.agent_events import normalize_agent_events
 
 
 class AgentEventNormalizationTests(unittest.TestCase):
+    def test_provider_diagnostics_are_sanitized(self):
+        events = normalize_agent_events(
+            "codex", "failed Authorization: Bearer example-credential",
+            "agent-root", "stderr",
+        )
+        self.assertEqual(len(events), 1)
+        self.assertNotIn("example-credential", str(events[0].data))
+        self.assertIn("[redacted]", str(events[0].data))
+
+    def test_fallback_provider_event_is_sanitized(self):
+        events = normalize_agent_events(
+            "other",
+            json.dumps({"type": "tool", "Authorization": "demo-credential"}),
+            "agent-root",
+        )
+        self.assertEqual(len(events), 1)
+        self.assertNotIn("demo-credential", str(events[0].data))
+        self.assertIn("[redacted]", str(events[0].data))
+
     def test_antigravity_response_delta_and_child_are_preserved(self):
         event = {
             "event": "step_update",
